@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 DataRobot, Inc. and its affiliates. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Simulator-comparison configuration; experiments/simulator_comparison/config.py
+# describes every field. Paths are relative to the repository root; services
+# and GPUs come from .env, as for any user of the library.
+
+prices: data/stock_data/sp500.csv
+output: results/simulator_comparison/pilot.parquet
+trials: 3
+origins: 2
+assets: 100
+look_back: 252
+forward: 63
+num_scen: 10000
+seed: 0
+# jointfm runs on the device of the service .env selects; run the config again
+# with .env pointing at the other device's service to add that JointFM arm.
+arms: [no_fit-cpu, gaussian-cpu, kde-cpu, kde-gpu, jointfm]
+# Rebalancing backtest of the same trials' universes (task experiments:rebalance).
+rebalancing:
+  output: results/simulator_comparison/pilot_rebalancing.parquet
+  arms: [no_fit-cpu, gaussian-cpu, kde-gpu, jointfm]
+  trials: 3
+  trading_days: 378
+  look_forward_window: 21
+  # Calendar days, as rebalance_portfolio counts the look-back window.
+  look_back_days: 365
+  pct_change_threshold: -0.005
+  transaction_cost: 0.001
+  risk_free_rate: 0.0
+  solver: CUOPT
+  cvar:
+    w_min: -0.3
+    w_max: 0.8
+    c_min: 0.1
+    c_max: 0.4
+    L_tar: 1.6
+    T_tar: 0.5
+    confidence: 0.95
+    risk_aversion: 1.0

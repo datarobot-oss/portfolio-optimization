@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 DataRobot, Inc. and its affiliates. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import time
@@ -133,19 +134,14 @@ class CVaR(base_optimizer.BaseOptimizer):
 
         self._setup_optimization_problem()
 
-    def _scale_risk_aversion(self):
-        """
-        heuristically scale risk aversion parameter by the ratio of
-        the maximum of the return over CVaR for single-asset portfolios.
-        """
+    def _best_return_risk_ratio(self) -> float:
+        """Largest return/CVaR ratio of the single-asset portfolios."""
         single_portfolio_performance = cvar_utils.evaluate_single_asset_portfolios(self)
-        self._risk_aversion_scalar = (
-            single_portfolio_performance["return"]
-            / single_portfolio_performance["CVaR"]
-        ).max()
-
-        self.params.update_risk_aversion(
-            self.params.risk_aversion * self._risk_aversion_scalar
+        return float(
+            (
+                single_portfolio_performance["return"]
+                / single_portfolio_performance["CVaR"]
+            ).max()
         )
 
     def _setup_cvxpy_problem(self):

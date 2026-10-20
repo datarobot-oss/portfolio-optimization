@@ -44,6 +44,16 @@ This notebook introduces dynamic portfolio management techniques:
 - Analyzing strategy performance over different market conditions
 - Comparing multiple rebalancing approaches
 
+#### [`cvar_jointfm.ipynb`](cvar_jointfm.ipynb) - Scenarios from the JointFM Foundation Model
+
+This notebook repeats the basic workflow with scenarios from JointFM instead of KDE:
+- Selecting a JointFM service (your own instance, one DataRobot deployment, or a pool) through `.env`
+- Checking how many assets and history rows the served model accepts
+- Generating joint next-day scenarios with `fit_type="jointfm"`
+- Solving the Mean-CVaR problem on CPU
+
+It needs the `jointfm` extra and a reachable JointFM service; see [JointFM Scenarios](../README.md#jointfm-scenarios) in the main README.
+
 ### 3. All-in-One Notebook
 
 #### [`launchable.ipynb`](launchable.ipynb) - Combined Notebook for Brev Launchable

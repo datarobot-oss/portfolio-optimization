@@ -15,6 +15,7 @@ dependencies = [
     "seaborn>=0.13",
     "yfinance>=0.2.0",
     "pydantic>=2.12.5",
+    "python-dotenv>=1.2.2",
 ]
 
 # Extras are for genuine optional *runtime* features. Developer tooling lives
@@ -27,9 +28,26 @@ cuda12 = [
 cuda13 = [
     "cuml-cu13==26.4.*",
     "cuopt-cu13==26.4.*",
+    # CuPy 13 does not search the CUDA 13 wheels' library directory
+    # (nvidia/cu13/lib) and fails to load libnvrtc.so.13 for GPU KDE.
+    "cupy-cuda13x>=14.2",
 ]
 cuda13-socp = [
     "cuopt-cu13==26.6.*",
+]
+# Client for the JointFM scenario simulator (fit_type="jointfm"); it reaches a
+# local JointFM instance or DataRobot deployments over HTTP.
+jointfm = [
+    "jointfm-client==0.13.*",
+]
+# Runs under experiments/, which are not part of the package: the simulator
+# comparison reads its YAML configuration, writes its results table as
+# Parquet, scores with SciPy, and reports progress with tqdm.
+experiments = [
+    "pyarrow>=21",
+    "pyyaml>=6.0",
+    "scipy>=1.13",
+    "tqdm>=4.66",
 ]
 
 [tool.ruff]
@@ -50,6 +68,8 @@ combine-as-imports = true
 known-first-party = ["portfolio_optimization"]
 
 [tool.pytest.ini_options]
+# experiments/ is imported from the repository root, not installed.
+pythonpath = ["."]
 markers = [
     "gpu: requires an NVIDIA GPU with cuOpt/cuML (deselect with -m 'not gpu')",
 ]

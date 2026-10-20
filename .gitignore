@@ -30,6 +30,9 @@ env/
 ENV/
 portfolio-optimization-venv/
 
+# Environment files with service credentials (jointfm-client reads .env)
+.env
+
 # uv cache
 .uv/
 

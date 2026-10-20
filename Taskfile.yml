@@ -1,0 +1,137 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 DataRobot, Inc. and its affiliates. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Shortcuts for the experiments under experiments/ (https://taskfile.dev).
+# `task --list` shows every task. A YAML configuration file describes an
+# experiment completely; CONFIG selects it, for example
+# `task experiments:run CONFIG=experiments/simulator_comparison/configs/full.yaml`.
+#
+# The experiments read .env themselves, through the library's defaults, so this
+# file loads none: services and GPUs are configured in .env alone. Only
+# experiments:timing sets JOINTFM_LOCAL_BASE_URL per session, which overrides
+# the same variable in .env.
+
+version: '3'
+
+vars:
+  CONFIG_DIR: experiments/simulator_comparison/configs
+  # CUDA extra of pyproject.toml for the cuML arm: cuda12, cuda13, or cuda13-socp.
+  CUDA_EXTRA: '{{.CUDA_EXTRA | default "cuda13"}}'
+  # uv run installs what the experiment needs without removing anything else.
+  UV_EXPERIMENTS: uv run --extra {{.CUDA_EXTRA}} --extra jointfm --extra experiments
+
+tasks:
+  default:
+    desc: List the available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  experiments:run:
+    desc: >-
+      Run the simulator comparison of CONFIG (default: full.yaml), resuming its
+      results file if it exists
+    vars:
+      CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/full.yaml")}}'
+    cmds:
+      - '{{.UV_EXPERIMENTS}} python -m experiments.simulator_comparison --config {{.CONFIG}}'
+      - echo "experiments:run succeeded for {{.CONFIG}}"
+
+  experiments:report:
+    desc: >-
+      Tables and plots of the results of CONFIG (default full.yaml); EXCLUDE
+      leaves out arms, e.g. EXCLUDE=jointfm-cpu while that session still runs
+    vars:
+      CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/full.yaml")}}'
+    cmds:
+      - >-
+        uv run --extra experiments python -m experiments.simulator_comparison.report
+        --config {{.CONFIG}} {{if .EXCLUDE}}--exclude {{.EXCLUDE}}{{end}}
+      - echo "experiments:report succeeded for {{.CONFIG}}"
+
+  experiments:rebalance:
+    desc: >-
+      Rebalancing backtest of every trial's universe per simulator for CONFIG
+      (default full.yaml), resuming its results file, then its report
+    vars:
+      CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/full.yaml")}}'
+    cmds:
+      - '{{.UV_EXPERIMENTS}} python -m experiments.simulator_comparison.rebalancing --config {{.CONFIG}}'
+      - echo "experiments:rebalance succeeded for {{.CONFIG}}"
+
+  experiments:rebalance-report:
+    desc: >-
+      Tables and plots of the rebalancing results of CONFIG (default full.yaml),
+      without running anything
+    vars:
+      CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/full.yaml")}}'
+    cmds:
+      - >-
+        uv run --extra experiments python -m
+        experiments.simulator_comparison.rebalancing_report --config {{.CONFIG}}
+      - echo "experiments:rebalance-report succeeded for {{.CONFIG}}"
+
+  experiments:fresh:
+    desc: >-
+      Delete every output of CONFIG (default full.yaml), then run the scenario
+      comparison, its report, and the rebalancing backtests with their report
+      from scratch
+    vars:
+      CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/full.yaml")}}'
+    cmds:
+      - >-
+        uv run --extra experiments python -m experiments.simulator_comparison.clean
+        --config {{.CONFIG}}
+      - task: experiments:run
+        vars: {CONFIG: '{{.CONFIG}}'}
+      - task: experiments:report
+        vars: {CONFIG: '{{.CONFIG}}'}
+      - task: experiments:rebalance
+        vars: {CONFIG: '{{.CONFIG}}'}
+      - echo "experiments:fresh succeeded for {{.CONFIG}}"
+
+  experiments:timing:
+    desc: >-
+      JointFM CPU-against-GPU timing from scratch (default timing.yaml): one
+      session per service, GPU_URL then CPU_URL, each set as
+      JOINTFM_LOCAL_BASE_URL over .env, then the report
+    requires:
+      vars: [GPU_URL, CPU_URL]
+    vars:
+      CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/timing.yaml")}}'
+    cmds:
+      - >-
+        uv run --extra experiments python -m experiments.simulator_comparison.clean
+        --config {{.CONFIG}}
+      - >-
+        JOINTFM_LOCAL_BASE_URL={{.GPU_URL}} {{.UV_EXPERIMENTS}} python -m
+        experiments.simulator_comparison --config {{.CONFIG}}
+      - >-
+        JOINTFM_LOCAL_BASE_URL={{.CPU_URL}} {{.UV_EXPERIMENTS}} python -m
+        experiments.simulator_comparison --config {{.CONFIG}}
+      - task: experiments:report
+        vars: {CONFIG: '{{.CONFIG}}'}
+      - echo "experiments:timing succeeded for {{.CONFIG}}"
+
+  experiments:pilot:
+    desc: >-
+      Short run and report (default pilot.yaml) to measure cost per arm and
+      noise before sizing the full run
+    vars:
+      CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/pilot.yaml")}}'
+    cmds:
+      - task: experiments:run
+        vars: {CONFIG: '{{.CONFIG}}'}
+      - task: experiments:report
+        vars: {CONFIG: '{{.CONFIG}}'}
+      - echo "experiments:pilot succeeded for {{.CONFIG}}"
+
+  experiments:test:
+    desc: CPU tests of the experiments (no GPU or JointFM service needed)
+    cmds:
+      - >-
+        uv run --group dev --extra experiments pytest
+        tests/test_simulator_comparison.py tests/test_simulator_config.py
+        tests/test_simulator_scores.py tests/test_simulator_report.py
+        tests/test_simulator_rebalancing.py tests/test_simulator_clean.py -q
+      - echo "experiments:test succeeded"

@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 DataRobot, Inc. and its affiliates. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -747,16 +748,6 @@ def create_rebalancing_progressive(
 ):
     """Run progressive rebalancing with per-period updates via queues."""
     try:
-        # Initialize CUDA context for GPU thread
-        is_gpu = solver_settings.get("solver") == cp.CUOPT
-        if is_gpu:
-            try:
-                import cupy as cupy_cuda
-
-                cupy_cuda.cuda.Device(0).use()
-            except Exception:
-                pass
-
         progress_queue.put(
             {
                 "solver": solver_name,

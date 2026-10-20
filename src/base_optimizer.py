@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 DataRobot, Inc. and its affiliates. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -211,7 +212,32 @@ class BaseOptimizer:
         pass
 
     def _scale_risk_aversion(self):
-        """Scale risk aversion heuristically. Must be implemented by subclasses."""
+        """Multiply risk aversion by the best single-asset return/risk ratio.
+
+        The scaled risk aversion prices risk at the rate the best single asset
+        of this data offers, so ``risk_aversion=1`` means the same trade-off at
+        any return frequency. A non-positive ratio, where no asset has a
+        positive mean return, gives that rate no meaning and would turn the
+        objective into pure return maximization or flip its sign.
+
+        Raises
+        ------
+        ValueError
+            If the best return/risk ratio is not positive (or is NaN).
+        """
+        ratio = self._best_return_risk_ratio()
+        if not ratio > 0:
+            raise ValueError(
+                "Cannot scale risk aversion: the best single-asset return/risk "
+                f"ratio is {ratio:.4g}, because no asset has a positive mean "
+                "return in this data. Pass ApiSettings(scale_risk_aversion=False) "
+                "and set an absolute risk_aversion instead."
+            )
+        self._risk_aversion_scalar = ratio
+        self.params.update_risk_aversion(self.params.risk_aversion * ratio)
+
+    def _best_return_risk_ratio(self) -> float:
+        """Largest single-asset return/risk ratio. Must be implemented by subclasses."""
         raise NotImplementedError
 
     def _setup_cvxpy_problem(self):

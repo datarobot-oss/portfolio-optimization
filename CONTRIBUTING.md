@@ -68,7 +68,7 @@ There are many ways to contribute to the portfolio optimization developer exampl
 
    | Install as | Contains | Example |
    | --- | --- | --- |
-   | `--extra` | genuine optional *runtime* features | `--extra cuda12`, `--extra cuda13`, `--extra cuda13-socp` |
+   | `--extra` | genuine optional *runtime* features | `--extra cuda12`, `--extra cuda13`, `--extra cuda13-socp`, `--extra jointfm` |
    | `--group dev` | developer tooling: `ruff`, `pytest`, `pre-commit` | `uv sync --group dev` |
    | `--group notebooks` | `ipykernel`, for registering the Jupyter kernel | `uv sync --extra cuda13 --group notebooks` |
 

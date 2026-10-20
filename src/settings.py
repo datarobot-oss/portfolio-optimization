@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 DataRobot, Inc. and its affiliates. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Configuration settings for portfolio optimization workflows.
 
 This module provides Pydantic-based settings classes for configuring:
 - Returns computation (return type, frequency, device)
-- Scenario generation (number of scenarios, fitting method, KDE settings)
+- Scenario generation (number of scenarios, fitting method, KDE and JointFM
+  settings)
 - API selection (solver API, constraint types)
 
 These settings classes provide validation, default values, and type safety
@@ -62,6 +64,61 @@ class KDESettings(BaseModel):
         return v
 
 
+class JointFMSettings(BaseModel):
+    """Configuration for scenario generation with a JointFM forecasting model.
+
+    Used within ScenarioGenerationSettings when fit_type is 'jointfm'. Each
+    scenario is one joint draw of the next period's asset returns, so it has
+    the same meaning as a 'gaussian' or 'kde' scenario. The simulator sends
+    the look-back window's log-price path, rebuilt from its returns, forecasts
+    the next log price, and converts its difference to the last log price
+    into the configured return type; prices implied by the scenarios are
+    therefore always positive. This needs one-period ('LOG' or 'LINEAR',
+    freq=1) returns. The path is sent whole when it fits the served model's
+    history capacity and cut to its most recent points otherwise.
+
+    The endpoint, credentials, and choice between a local instance, one
+    hosted deployment, or a pool of deployments are not settings here: the
+    ``jointfm-client`` SDK resolves them from its environment variables, read
+    from the process environment, ``dotenv_path``, and ``config_path``.
+
+    Attributes
+    ----------
+    expected_return : str
+        Source of the expected returns stored in ``CvarData.mean``:
+        - 'scenario': mean of the JointFM scenarios, so expected return and
+          CVaR come from the same forecast distribution
+        - 'historical': mean of the look-back window's returns, the value
+          the other fit types use
+        Default is 'scenario'.
+    dotenv_path : str, optional
+        ``.env`` file the client reads its environment variables from; a
+        missing file is skipped. None reads only the process environment.
+        Default is '.env'.
+    config_path : str, optional
+        Client YAML configuration file; a missing file is skipped. None uses
+        the client's built-in defaults. Default is 'config.yaml'.
+
+    Examples
+    --------
+    >>> jointfm_settings = JointFMSettings(expected_return='historical')
+    >>> print(jointfm_settings.dotenv_path)
+    .env
+    """
+
+    model_config = ConfigDict(validate_assignment=True)
+
+    expected_return: Literal["scenario", "historical"] = Field(
+        default="scenario", description="Source of CvarData.mean"
+    )
+    dotenv_path: Optional[str] = Field(
+        default=".env", description="Client .env file; None skips it"
+    )
+    config_path: Optional[str] = Field(
+        default="config.yaml", description="Client YAML configuration; None skips it"
+    )
+
+
 class ScenarioGenerationSettings(BaseModel):
     """Configuration for scenario generation in CVaR optimization.
 
@@ -77,10 +134,15 @@ class ScenarioGenerationSettings(BaseModel):
         - 'gaussian': Fit multivariate normal distribution
         - 'kde': Kernel density estimation for non-parametric fitting
         - 'no_fit': Use historical returns directly as scenarios
+        - 'jointfm': Sample scenarios from a JointFM forecasting model
+          (requires the 'jointfm' extra)
         Default is 'kde'.
     kde_settings : KDESettings, optional
         Settings for KDE fitting. Only used when fit_type='kde'.
         If None and fit_type='kde', default KDESettings are used.
+    jointfm_settings : JointFMSettings, optional
+        Settings for JointFM scenarios. Only used when fit_type='jointfm'.
+        If None and fit_type='jointfm', default JointFMSettings are used.
     verbose : bool
         Whether to print progress information. Default is False.
     seed : int, optional
@@ -112,11 +174,14 @@ class ScenarioGenerationSettings(BaseModel):
     num_scen: int = Field(
         default=10000, gt=0, description="Number of scenarios to simulate"
     )
-    fit_type: Literal["gaussian", "kde", "no_fit"] = Field(
+    fit_type: Literal["gaussian", "kde", "no_fit", "jointfm"] = Field(
         default="kde", description="Distribution fitting method"
     )
     kde_settings: Optional[KDESettings] = Field(
         default=None, description="KDE-specific settings"
+    )
+    jointfm_settings: Optional[JointFMSettings] = Field(
+        default=None, description="JointFM-specific settings"
     )
     verbose: bool = Field(default=False, description="Print progress information")
     seed: Optional[int] = Field(
@@ -129,6 +194,13 @@ class ScenarioGenerationSettings(BaseModel):
         """Set default KDE settings when fit_type is 'kde' and kde_settings is None."""
         if self.fit_type == "kde" and self.kde_settings is None:
             self.kde_settings = KDESettings()
+        return self
+
+    @model_validator(mode="after")
+    def set_default_jointfm_settings(self) -> "ScenarioGenerationSettings":
+        """Set default JointFM settings when fit_type is 'jointfm' and none are given."""
+        if self.fit_type == "jointfm" and self.jointfm_settings is None:
+            self.jointfm_settings = JointFMSettings()
         return self
 
 

@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 DataRobot, Inc. and its affiliates. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# JointFM CPU-against-GPU timing (task experiments:timing), sized for the CPU
+# service; experiments/simulator_comparison/config.py describes every field.
+# Paths are relative to the repository root.
+
+prices: data/stock_data/sp500.csv
+output: results/simulator_comparison/timing.parquet
+trials: 3
+origins: 4
+assets: 100
+look_back: 252
+forward: 63
+num_scen: 10000
+seed: 0
+# The report compares every arm with no_fit-cpu; jointfm runs once per service.
+arms: [no_fit-cpu, jointfm]
+# Required by the schema; experiments:timing runs no rebalancing.
+rebalancing:
+  output: results/simulator_comparison/timing_rebalancing.parquet
+  arms: [no_fit-cpu]
+  trials: 3
+  trading_days: 378
+  look_forward_window: 21
+  # Calendar days, as rebalance_portfolio counts the look-back window.
+  look_back_days: 365
+  pct_change_threshold: -0.005
+  transaction_cost: 0.001
+  risk_free_rate: 0.0
+  solver: CUOPT
+  cvar:
+    w_min: -0.3
+    w_max: 0.8
+    c_min: 0.1
+    c_max: 0.4
+    L_tar: 1.6
+    T_tar: 0.5
+    confidence: 0.95
+    risk_aversion: 1.0

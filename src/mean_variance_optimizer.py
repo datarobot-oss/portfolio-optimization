@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 DataRobot, Inc. and its affiliates. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import time
@@ -161,20 +162,11 @@ class MeanVariance(base_optimizer.BaseOptimizer):
             )
         return covariance
 
-    def _scale_risk_aversion(self):
-        """
-        Heuristically scale risk aversion parameter by the ratio of
-        the maximum return over standard deviation for single-asset portfolios.
-        """
+    def _best_return_risk_ratio(self) -> float:
+        """Largest return/standard-deviation ratio of the single assets."""
         std_devs = np.sqrt(np.diag(self.covariance))
         std_devs = np.maximum(std_devs, 1e-10)
-        return_risk_ratios = self.mean / std_devs
-
-        self._risk_aversion_scalar = np.max(return_risk_ratios)
-
-        self.params.update_risk_aversion(
-            self.params.risk_aversion * self._risk_aversion_scalar
-        )
+        return float(np.max(self.mean / std_devs))
 
     def _setup_cvxpy_problem(self):
         """

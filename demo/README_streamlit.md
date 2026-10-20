@@ -37,6 +37,8 @@ python -c 'from portfolio_optimization.utils import download_data; download_data
 streamlit run demo/rebalancing_streamlit_app.py --server.address 0.0.0.0 --server.port 8501
 ```
 
+The app solves on the first GPU that `CUDA_VISIBLE_DEVICES` lists. To choose it, set the variable in `.env` (see [GPU Selection](../README.md#gpu-selection)) and start the app with `uv run --env-file .env streamlit run ...`, or export it before `streamlit run`.
+
 Open `http://localhost:8501` for local runs. On a remote GPU instance, forward or expose port `8501` according to your environment.
 
 ## Requirements

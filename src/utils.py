@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 DataRobot, Inc. and its affiliates. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Utility functions for portfolio optimization and data processing."""
@@ -102,6 +103,7 @@ def calculate_returns(
 
     returns_dict = {
         "return_type": return_type,
+        "freq": freq,
         "returns": returns_dataframe,
         "regime": regime_dict,
         "dates": returns_dataframe.index,

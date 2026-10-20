@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 DataRobot, Inc. and its affiliates. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -22,6 +23,11 @@ rebalance_portfolio
     Main class for implementing dynamic rebalancing strategies with CVaR
     optimization and configurable trigger conditions.
 
+Functions
+---------
+run_rebalancing
+    Build and run one rebalancing strategy, as a job for ``gpu.run_on_gpus``.
+
 """
 
 import os
@@ -34,7 +40,15 @@ import seaborn as sns
 from matplotlib.lines import Line2D
 
 from . import backtest, cvar_optimizer, cvar_parameters, cvar_utils, portfolio, utils
-from .settings import ReturnsComputeSettings, ScenarioGenerationSettings
+from .settings import ApiSettings, ReturnsComputeSettings, ScenarioGenerationSettings
+
+# Plot-title name of each ScenarioGenerationSettings.fit_type.
+SCENARIO_GENERATOR_NAMES = {
+    "gaussian": "Gaussian",
+    "kde": "KDE",
+    "no_fit": "Historical",
+    "jointfm": "JointFM",
+}
 
 
 class rebalance_portfolio:
@@ -67,6 +81,13 @@ class rebalance_portfolio:
         Rebalancing trigger conditions with type and threshold.
     print_opt_result : bool, default False
         Whether to print detailed optimization results.
+    api_settings : ApiSettings, optional
+        Optimizer API settings for every optimization of the run, the
+        buy-and-hold baseline included; the CVaR defaults when omitted. Turn
+        ``scale_risk_aversion`` off to keep one absolute risk aversion across
+        look-back windows: the scaling takes its rate from each window's best
+        single-asset return/CVaR ratio and refuses a window in which every
+        asset lost money.
     """
 
     def __init__(
@@ -82,6 +103,7 @@ class rebalance_portfolio:
         solver_settings: dict,
         re_optimize_criteria: dict,
         print_opt_result: bool = False,
+        api_settings: ApiSettings | None = None,
     ):
         """Initialize rebalancing portfolio with optimization parameters."""
         self.dataset_directory = dataset_directory
@@ -96,6 +118,7 @@ class rebalance_portfolio:
         self.returns_compute_settings = returns_compute_settings
         self.scenario_generation_settings = scenario_generation_settings
         self.print_opt_result = print_opt_result
+        self.api_settings = api_settings
 
         self.re_optimize_criteria = re_optimize_criteria
         self.re_optimize_type = re_optimize_criteria["type"].lower()
@@ -245,6 +268,7 @@ class rebalance_portfolio:
                 re_optimize_problem = cvar_optimizer.CVaR(
                     returns_dict=optimize_returns_dict,
                     cvar_params=self.cvar_params,
+                    api_settings=self.api_settings,
                     existing_portfolio=existing_portfolio,
                 )
 
@@ -610,7 +634,9 @@ class rebalance_portfolio:
             Directory for saving plots.
         plot_title : str, optional
             Custom title for the plot. If not provided, a title is generated
-            from the rebalancing strategy type.
+            from the rebalancing strategy type and the scenario generator
+            (``scenario_generation_settings.fit_type``), which also prefixes
+            the saved file name.
         """
 
         # Use the same styling as efficient frontier
@@ -733,7 +759,13 @@ class rebalance_portfolio:
             rebalance_type = self.re_optimize_type.replace("_", " ").title()
             if rebalance_type == "Pct Change":
                 rebalance_type = "Percentage Change"
-            title = f"\n{rebalance_type} Rebalancing Strategy"
+            scenario_generator = SCENARIO_GENERATOR_NAMES[
+                self.scenario_generation_settings.fit_type
+            ]
+            title = (
+                f"\n{rebalance_type} Rebalancing Strategy "
+                f"with {scenario_generator} Scenarios"
+            )
         else:
             title = f"\n{plot_title}"
         ax.set_title(title, fontsize=16, fontweight="bold", pad=20)
@@ -851,8 +883,9 @@ class rebalance_portfolio:
             end_date = self.trading_end.strftime("%Y%m%d")
             _ = len(re_optimize_dates)  # num_rebalances (unused)
 
+            fit_type = self.scenario_generation_settings.fit_type
             filename = (
-                f"rebalancing_{strategy_name}_with_threshold_"
+                f"rebalancing_{fit_type}_{strategy_name}_with_threshold_"
                 f"{self.re_optimize_threshold}_{start_date}-{end_date}events.png"
             )
             filepath = os.path.join(results_dir, filename)
@@ -968,3 +1001,34 @@ class rebalance_portfolio:
         # Show the plot
         plt.tight_layout()
         plt.show()
+
+
+def run_rebalancing(
+    rebalancer_kwargs: dict, re_optimize_kwargs: dict
+) -> tuple[rebalance_portfolio, tuple[pd.DataFrame, list, pd.Series]]:
+    """Build a ``rebalance_portfolio`` and run its ``re_optimize`` as one job.
+
+    A module-level job for :func:`portfolio_optimization.gpu.run_on_gpus`, which
+    runs independent rebalancing runs in parallel worker processes. Build and run
+    happen together because the constructor already solves the buy-and-hold
+    baseline, so it belongs on the worker's GPU too.
+
+    Parameters
+    ----------
+    rebalancer_kwargs : dict
+        Keyword arguments of ``rebalance_portfolio``.
+    re_optimize_kwargs : dict
+        Keyword arguments of ``rebalance_portfolio.re_optimize``. Plotting in a
+        worker shows nothing, so leave ``plot_results`` off and call
+        ``plot_results`` on the returned rebalancer instead.
+
+    Returns
+    -------
+    rebalancer : rebalance_portfolio
+        The rebalancer after the run, for ``plot_results`` in the calling process.
+    re_optimize_result : tuple
+        What ``re_optimize`` returned: the results frame, the rebalancing dates,
+        and the cumulative portfolio value.
+    """
+    rebalancer = rebalance_portfolio(**rebalancer_kwargs)
+    return rebalancer, rebalancer.re_optimize(**re_optimize_kwargs)
