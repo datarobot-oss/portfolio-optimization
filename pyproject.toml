@@ -104,6 +104,9 @@ conflicts = [
         { extra = "cuda13-socp" },
     ],
 ]
+# Linux is the only supported OS (see README); the RAPIDS CUDA extras ship no
+# macOS or Windows wheels.
+environments = ["sys_platform == 'linux'"]
 
 [[tool.uv.index]]
 name = "nvidia"
