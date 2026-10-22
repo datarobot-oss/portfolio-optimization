@@ -38,7 +38,7 @@ cuda13-socp = [
 # Client for the JointFM scenario simulator (fit_type="jointfm"); it reaches a
 # local JointFM instance or DataRobot deployments over HTTP.
 jointfm = [
-    "jointfm-client==0.13.*",
+    "jointfm-client==0.14.*",
 ]
 # Runs under experiments/, which are not part of the package: the simulator
 # comparison reads its YAML configuration, writes its results table as
