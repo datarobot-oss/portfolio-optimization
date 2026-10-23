@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 DataRobot, Inc. and its affiliates. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
@@ -19,6 +20,10 @@ class CvarData(BaseModel):
         each row is asset return deviation for a scenario.
     p : np.ndarray
         Scenario probabilities, shape (num_scenarios,), summing to 1.
+    cash_return : float, default 0.0
+        Return of cash over one period, in the units of ``mean`` and ``R``
+        (``risk_free.cash_returns``). The optimizer adds it, times the cash
+        weight, to the expected return and to every scenario's return.
 
     Examples
     --------
@@ -45,3 +50,4 @@ class CvarData(BaseModel):
     mean: np.ndarray
     R: np.ndarray
     p: np.ndarray
+    cash_return: float = 0.0

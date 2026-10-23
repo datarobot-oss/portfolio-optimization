@@ -39,8 +39,25 @@ import pandas as pd
 import seaborn as sns
 from matplotlib.lines import Line2D
 
-from . import backtest, cvar_optimizer, cvar_parameters, cvar_utils, portfolio, utils
+from . import (
+    backtest,
+    cvar_optimizer,
+    cvar_parameters,
+    cvar_utils,
+    portfolio,
+    risk_free,
+    utils,
+)
 from .settings import ApiSettings, ReturnsComputeSettings, ScenarioGenerationSettings
+
+# Rebalancing triggers that re_optimize_criteria["type"] selects.
+RE_OPTIMIZE_TYPES = (
+    "pct_change",
+    "drift_from_optimal",
+    "max_drawdown",
+    "every_step",
+    "no_re_optimize",
+)
 
 # Plot-title name of each ScenarioGenerationSettings.fit_type.
 SCENARIO_GENERATOR_NAMES = {
@@ -78,7 +95,14 @@ class rebalance_portfolio:
     solver_settings : dict
         Solver configuration for optimization backend.
     re_optimize_criteria : dict
-        Rebalancing trigger conditions with type and threshold.
+        Rebalancing trigger: ``type`` and ``threshold``, plus ``norm`` (1 or 2)
+        for ``drift_from_optimal``. After each look-forward window the
+        portfolio is re-optimized when ``pct_change`` sees the window's return,
+        or the sum of the losing windows since the last re-optimization, fall
+        below the threshold; when ``drift_from_optimal`` sees the weights drift
+        more than the threshold; when ``max_drawdown`` sees the window's
+        drawdown exceed it; always with ``every_step``; never with
+        ``no_re_optimize``. The last two ignore the threshold.
     print_opt_result : bool, default False
         Whether to print detailed optimization results.
     api_settings : ApiSettings, optional
@@ -88,6 +112,12 @@ class rebalance_portfolio:
         look-back windows: the scaling takes its rate from each window's best
         single-asset return/CVaR ratio and refuses a window in which every
         asset lost money.
+    risk_free_rate : float or pd.Series, default 0.0
+        Annual decimal rate that cash earns: one rate, or rates indexed by
+        quote date (``risk_free.load_risk_free_rates``). Each optimization
+        credits cash with the rate quoted on its date, and the backtests,
+        buy-and-hold included, accrue it as ``backtest.portfolio_backtester``
+        does.
     """
 
     def __init__(
@@ -104,6 +134,7 @@ class rebalance_portfolio:
         re_optimize_criteria: dict,
         print_opt_result: bool = False,
         api_settings: ApiSettings | None = None,
+        risk_free_rate: float | pd.Series = 0.0,
     ):
         """Initialize rebalancing portfolio with optimization parameters."""
         self.dataset_directory = dataset_directory
@@ -119,9 +150,15 @@ class rebalance_portfolio:
         self.scenario_generation_settings = scenario_generation_settings
         self.print_opt_result = print_opt_result
         self.api_settings = api_settings
+        self.risk_free_rate = risk_free_rate
 
         self.re_optimize_criteria = re_optimize_criteria
         self.re_optimize_type = re_optimize_criteria["type"].lower()
+        if self.re_optimize_type not in RE_OPTIMIZE_TYPES:
+            raise ValueError(
+                f"Unknown re-optimization type {re_optimize_criteria['type']!r}; "
+                f"choose from {list(RE_OPTIMIZE_TYPES)}."
+            )
         self.re_optimize_threshold = re_optimize_criteria["threshold"]
 
         self._get_price_data()
@@ -261,8 +298,17 @@ class rebalance_portfolio:
                 optimize_returns_dict = utils.calculate_returns(
                     self.price_data, optimize_regime, self.returns_compute_settings
                 )
+                # The period after the optimization date earns the rate quoted on it.
+                cash_return = risk_free.cash_returns(
+                    self.risk_free_rate,
+                    pd.DatetimeIndex([backtest_date + pd.Timedelta(days=1)]),
+                    self.returns_compute_settings.return_type.upper(),
+                    self.returns_compute_settings.freq,
+                )[0]
                 optimize_returns_dict = cvar_utils.generate_cvar_data(
-                    optimize_returns_dict, self.scenario_generation_settings
+                    optimize_returns_dict,
+                    self.scenario_generation_settings,
+                    cash_return=float(cash_return),
                 )
 
                 re_optimize_problem = cvar_optimizer.CVaR(
@@ -311,7 +357,10 @@ class rebalance_portfolio:
 
             # run backtest
             backtester = backtest.portfolio_backtester(
-                current_portfolio, test_returns_dict, benchmark_portfolios=None
+                current_portfolio,
+                test_returns_dict,
+                risk_free_rate=self.risk_free_rate,
+                benchmark_portfolios=None,
             )
             backtest_result = backtester.backtest_single_portfolio(current_portfolio)
             cur_cumulative_portfolio_returns = (
@@ -353,6 +402,10 @@ class rebalance_portfolio:
                     result = backtest_result["max drawdown"].values[0]
                     re_optimize_flag = self._check_max_drawdown(result)
 
+                elif self.re_optimize_type == "every_step":
+                    re_optimize_flag = True
+                    result = None
+
                 elif self.re_optimize_type == "no_re_optimize":
                     re_optimize_flag = False
                     result = None
@@ -374,7 +427,10 @@ class rebalance_portfolio:
                 self.price_data, tail_regime, self.returns_compute_settings
             )
             tail_bt = backtest.portfolio_backtester(
-                current_portfolio, tail_returns, benchmark_portfolios=None
+                current_portfolio,
+                tail_returns,
+                risk_free_rate=self.risk_free_rate,
+                benchmark_portfolios=None,
             )
             tail_result = tail_bt.backtest_single_portfolio(current_portfolio)
             (

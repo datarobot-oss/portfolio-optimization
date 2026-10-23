@@ -630,6 +630,8 @@ class TestJointFMSimulator:
         returns_compute_settings,
         losing=False,
         api_settings=None,
+        # Any period return is below +100%, so every period re-optimizes.
+        re_optimize_criteria=(("type", "pct_change"), ("threshold", 1.0)),
     ):
         dates = pd.date_range("2023-01-02", periods=200, freq="B")
         if losing:
@@ -658,10 +660,38 @@ class TestJointFMSimulator:
             look_back_window=60,
             cvar_params=cvar_params,
             solver_settings={"solver": cp.CLARABEL, "verbose": False},
-            # Any period return is below +100%, so every period re-optimizes.
-            re_optimize_criteria={"type": "pct_change", "threshold": 1.0},
+            re_optimize_criteria=dict(re_optimize_criteria),
             api_settings=api_settings,
         )
+
+    def test_every_step_re_optimizes_after_every_window(
+        self, tmp_path, fake_jointfm, cvar_params
+    ):
+        rebalancer = self._rebalancer(
+            tmp_path,
+            cvar_params,
+            ReturnsComputeSettings(return_type="LOG", freq=1),
+            re_optimize_criteria=(("type", "every_step"), ("threshold", None)),
+        )
+        _, re_optimize_dates, _ = rebalancer.re_optimize()
+        # The first window holds the buy-and-hold portfolio; each later one starts
+        # with a re-optimization, up to the last complete window.
+        window = rebalancer.look_forward_window
+        last_start = len(rebalancer.dates_range) - window
+        assert re_optimize_dates == list(
+            rebalancer.dates_range[window:last_start:window]
+        )
+
+    def test_unknown_re_optimization_type_is_refused(
+        self, tmp_path, fake_jointfm, cvar_params
+    ):
+        with pytest.raises(ValueError, match="Unknown re-optimization type 'monthly'"):
+            self._rebalancer(
+                tmp_path,
+                cvar_params,
+                ReturnsComputeSettings(return_type="LOG", freq=1),
+                re_optimize_criteria=(("type", "monthly"), ("threshold", 0.0)),
+            )
 
     def test_rebalancing_applies_api_settings_to_every_optimization(
         self, tmp_path, fake_jointfm, cvar_params
@@ -992,6 +1022,7 @@ class TestBacktester:
         returns_df = pd.DataFrame(daily_returns, index=dates, columns=TICKERS)
         return {
             "return_type": "LOG",
+            "freq": 1,
             "returns": returns_df,
             "dates": returns_df.index,
             "mean": np.mean(daily_returns, axis=0),

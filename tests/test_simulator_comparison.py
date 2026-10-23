@@ -60,9 +60,10 @@ def _config(tmp_path, prices_path, **overrides):
             trading_days=10,
             look_forward_window=5,
             look_back_days=90,
+            trigger="every_step",
             pct_change_threshold=-0.005,
             transaction_cost=0.001,
-            risk_free_rate=0.0,
+            risk_free_rates=tmp_path / "rates.csv",
             solver="CLARABEL",
             cvar=dict(
                 w_min=0.0,

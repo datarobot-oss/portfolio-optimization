@@ -25,15 +25,16 @@ rebalancing:
   look_forward_window: 21
   # Calendar days, as rebalance_portfolio counts the look-back window.
   look_back_days: 365
+  trigger: every_step
   pct_change_threshold: -0.005
   transaction_cost: 0.001
-  risk_free_rate: 0.0
+  risk_free_rates: data/rates/dtb3.csv
   solver: CUOPT
   cvar:
     w_min: -0.3
     w_max: 0.8
     c_min: 0.1
-    c_max: 0.4
+    c_max: 0.2
     L_tar: 1.6
     T_tar: 0.5
     confidence: 0.95

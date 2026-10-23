@@ -5,37 +5,38 @@
 # describes every field. Paths are relative to the repository root; services
 # and GPUs come from .env, as for any user of the library.
 
-prices: data/stock_data/sp500.csv
-output: results/simulator_comparison/full.parquet
-trials: 50
-origins: 20
-assets: 100
-look_back: 252
-forward: 63
-num_scen: 10000
-seed: 0
+prices: data/stock_data/sp500.csv                                # daily price table the trials draw assets and dates from
+output: results/simulator_comparison/full.parquet                # scenario-comparison results (Parquet)
+trials: 200                                                      # scenario-comparison trials, each one asset universe with its own forecast dates
+origins: 20                                                      # forecast dates per trial
+assets: 100                                                      # assets per trial universe
+look_back: 252                                                   # daily returns before each forecast date that the simulators fit
+forward: 63                                                      # daily returns after each forecast date, read only by the scores
+num_scen: 50000                                                  # scenarios each simulator generates per forecast
+seed: 0                                                          # experiment seed; with the trial index it fixes assets, dates, and scenario seeds
 # jointfm runs on the device of the service .env selects; run the config again
 # with .env pointing at the other device's service to add that JointFM arm.
-arms: [no_fit-cpu, gaussian-cpu, kde-cpu, kde-gpu, jointfm]
+arms: [no_fit-cpu, gaussian-cpu, kde-gpu, jointfm]               # simulators compared, each as simulator-device
 # Rebalancing backtest of the same trials' universes (task experiments:rebalance).
-rebalancing:
-  output: results/simulator_comparison/full_rebalancing.parquet
-  arms: [no_fit-cpu, gaussian-cpu, kde-gpu, jointfm]
-  trials: 200
-  trading_days: 378
-  look_forward_window: 21
+rebalancing:                                                     # rebalancing backtest settings
+  output: results/simulator_comparison/full_rebalancing.parquet  # rebalancing results (Parquet)
+  arms: [no_fit-cpu, gaussian-cpu, kde-gpu, jointfm]             # simulators backtested
+  trials: 200                                                    # backtest trials; trial i trades the assets of scenario trial i
+  trading_days: 378                                              # trading days in each trial's randomly drawn trading window
+  look_forward_window: 21                                        # trading days per step between re-optimization decisions
   # Calendar days, as rebalance_portfolio counts the look-back window.
-  look_back_days: 365
-  pct_change_threshold: -0.005
-  transaction_cost: 0.001
-  risk_free_rate: 0.0
-  solver: CUOPT
-  cvar:
-    w_min: -0.3
-    w_max: 0.8
-    c_min: 0.1
-    c_max: 0.4
-    L_tar: 1.6
-    T_tar: 0.5
-    confidence: 0.95
-    risk_aversion: 1.0
+  look_back_days: 365                                            # calendar days of history each optimization fits
+  trigger: every_step                                            # when to re-optimize after a step: every_step or pct_change
+  pct_change_threshold: -0.005                                   # loss threshold of the pct_change trigger; every_step ignores it
+  transaction_cost: 0.001                                        # cost as a fraction of turnover
+  risk_free_rates: data/rates/dtb3.csv                           # dated annual rates that cash earns (task data:risk-free-rates)
+  solver: CUOPT                                                  # solver of every optimization: CUOPT (GPU) or CLARABEL (CPU)
+  cvar:                                                          # CVaR optimization constraints
+    w_min: -0.3                                                  # lower bound of each asset weight; below 0 allows shorts
+    w_max: 0.8                                                   # upper bound of each asset weight
+    c_min: 0.1                                                   # lower bound of the cash weight
+    c_max: 0.2                                                   # upper bound of the cash weight
+    L_tar: 1.6                                                   # upper bound of gross exposure, the sum of absolute weights
+    T_tar: 0.5                                                   # upper bound of turnover per re-optimization
+    confidence: 0.95                                             # CVaR level; CVaR averages the worst 1 - confidence of scenarios
+    risk_aversion: 1.0                                           # base weight of CVaR against expected return, scaled once per trial

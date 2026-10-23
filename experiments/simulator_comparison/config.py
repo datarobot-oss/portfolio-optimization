@@ -93,16 +93,26 @@ class RebalancingConfig(BaseModel):
         description="Calendar days of history each re-optimization fits; "
         "rebalance_portfolio counts this window in calendar, not trading, days.",
     )
+    trigger: Literal["every_step", "pct_change"] = Field(
+        description="When the portfolio is re-optimized after a step: every_step "
+        "re-optimizes after every look_forward_window, a fixed calendar that gives "
+        "every arm the same decision dates; pct_change re-optimizes only when the "
+        "step's return, or the sum of the losing steps since the last "
+        "re-optimization, falls below pct_change_threshold."
+    )
     pct_change_threshold: float = Field(
-        description="Percentage-change trigger: re-optimize when a step's return "
-        "falls below this fraction (negative, e.g. -0.005 for a 0.5 % loss)."
+        description="Loss threshold of the pct_change trigger, a negative fraction "
+        "(e.g. -0.005 for a 0.5 % loss); every_step ignores it."
     )
     transaction_cost: float = Field(
         ge=0, description="Transaction cost as a fraction of turnover."
     )
-    risk_free_rate: float = Field(
-        description="Annual risk-free rate the Sharpe and Sortino ratios subtract, "
-        "compounded to a daily rate."
+    risk_free_rates: Path = Field(
+        description="CSV of annual risk-free rates by quote date, as "
+        "`task data:risk-free-rates` downloads them (the 3-month Treasury bill "
+        "rate, FRED DTB3). Cash earns them in every optimization and backtest, "
+        "and the Sharpe and Sortino ratios subtract them; each period earns the "
+        "rate quoted before it ends, compounded over 252 trading days a year."
     )
     solver: Literal["CUOPT", "CLARABEL"] = Field(
         description="CVXPY solver of every optimization: CUOPT (GPU, PDLP) for runs, "

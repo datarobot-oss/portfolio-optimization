@@ -73,8 +73,9 @@ This runs each trial's universe through the library's rebalancing backtest (`reb
 
 - **Trials:** `rebalancing.trials` sets the count independently of the scenario comparison. Trial `i` trades the assets of scenario trial `i`, drawn from the experiment seed and `i` alone, so the trials both run share their universes.
 - **Trading window:** each trial draws its own window of `trading_days` from its seed.
-- **Rebalancing rule:** every `look_forward_window` trading days, the portfolio is re-optimized if the last step lost more than `pct_change_threshold`, with the configured transaction cost and CVaR constraints.
+- **Rebalancing rule:** after every `look_forward_window` trading days, `trigger` decides whether the portfolio is re-optimized, with the configured transaction cost and CVaR constraints. `every_step` re-optimizes every time, a fixed calendar that gives every arm the same decision dates, so arms differ only in their scenarios. `pct_change` re-optimizes only when the step's return, or the sum of the losing steps since the last re-optimization, falls below `pct_change_threshold`.
 - **Risk aversion:** the configured base is scaled once per trial on the history before the window, as the rebalancing notebook does. The runs keep that value, with no per-window scaling.
+- **Cash:** cash earns the daily 3-month Treasury bill rate from `rebalancing.risk_free_rates`, which `task data:risk-free-rates` downloads from FRED (series DTB3). Every optimization credits cash with the rate quoted on its date, the backtest accrues the rate day by day, and the Sharpe and Sortino ratios subtract it. A day earns the rate quoted before it, compounded over 252 trading days a year.
 - **Pairing:** all arms of a trial share the window, constraints, risk aversion and scenario seed.
 - **Arms:** the device changes only speed, not the portfolios, so one arm per simulator is enough. `jointfm` reaches the service `.env` selects.
 
@@ -84,7 +85,7 @@ Each run records:
 |---|---|
 | Per step | Mean step return (average PnL per step) and step-return volatility |
 | Over the window | Total simple return, annualized return and volatility, maximum drawdown |
-| Risk-adjusted | Sharpe and Sortino ratios against `risk_free_rate`, Calmar ratio |
+| Risk-adjusted | Sharpe and Sortino ratios against the daily risk-free rate, Calmar ratio |
 | Trading | Turnover and rebalance count |
 | Baseline | Buy-and-hold return of the first portfolio |
 | Path | The per-step returns |

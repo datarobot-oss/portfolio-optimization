@@ -24,6 +24,14 @@ ROWS = 300
 TRADING_DAYS = 20
 LOOK_FORWARD = 5
 ARMS = ("no_fit-cpu", "gaussian-cpu", "jointfm")
+RATES_FILE = "rates.csv"
+
+
+def _write_rates(path, low, high):
+    """Daily annual rates rising from ``low`` to ``high`` over the prices' span."""
+    dates = pd.date_range("2018-12-03", "2020-06-30", freq="B")
+    rates = pd.Series(np.linspace(low, high, len(dates)), index=dates, name="rate")
+    rates.rename_axis("Date").to_csv(path)
 
 
 @pytest.fixture()
@@ -37,6 +45,7 @@ def prices_path(tmp_path):
     )
     path = tmp_path / "prices.csv"
     frame.to_csv(path)
+    _write_rates(path.with_name(RATES_FILE), 0.01, 0.05)
     return path
 
 
@@ -48,15 +57,17 @@ def _config(tmp_path, prices_path, **rebalancing):
         trading_days=TRADING_DAYS,
         look_forward_window=LOOK_FORWARD,
         look_back_days=90,
+        trigger="every_step",
         pct_change_threshold=-0.005,
         transaction_cost=0.001,
-        risk_free_rate=0.0,
+        risk_free_rates=prices_path.with_name(RATES_FILE),
         solver="CLARABEL",
         cvar=dict(
             w_min=0.0,
             w_max=0.6,
             c_min=0.0,
-            c_max=1.0,
+            # Below 1, as in the run configs: an all-cash run has no drawdown for Calmar.
+            c_max=0.4,
             L_tar=1.6,
             T_tar=1.0,
             confidence=0.95,
@@ -101,6 +112,8 @@ def test_runs_every_arm_on_identical_trials(tmp_path, prices_path, fake_jointfm)
     assert set(frame["arm"]) == {"no_fit-cpu", "gaussian-cpu", "jointfm-cpu"}
     steps = TRADING_DAYS // LOOK_FORWARD
     assert all(len(returns) == steps for returns in frame["step_returns"])
+    # every_step re-optimizes at the start of each step after the first.
+    assert (frame["rebalances"] == steps - 1).all()
     for row in frame.itertuples():
         compounded = np.prod(1 + np.asarray(row.step_returns)) - 1
         assert compounded == pytest.approx(row.total_return)
@@ -145,7 +158,8 @@ def test_standard_metrics_of_a_known_value_path():
         {"optimal_portfolio": [None, None], "re_optimized": [False, True]},
         index=dates[[0, 2]],
     )
-    readings = backtest_readings(results, value, value, steps=2, risk_free_rate=0.0)
+    zero = pd.Series(0.0, index=dates - pd.Timedelta(days=1))
+    readings = backtest_readings(results, value, value, steps=2, risk_free_rates=zero)
     daily = np.array([0.1, -0.1, 0.1, 1.2 / 1.089 - 1])
     assert readings["step_returns"] == pytest.approx([-0.01, 1.2 / 0.99 - 1])
     assert readings["total_return"] == pytest.approx(0.2)
@@ -162,6 +176,78 @@ def test_standard_metrics_of_a_known_value_path():
         readings["annualized_return"] / 0.1
     )
     assert readings["rebalances"] == 1
+
+
+def test_sharpe_and_sortino_subtract_the_daily_rate_quoted_before_each_day():
+    dates = pd.date_range("2024-01-01", periods=5, freq="B")
+    value = pd.Series([1.0, 1.1, 0.99, 1.089, 1.2], index=dates)
+    results = pd.DataFrame(
+        {"optimal_portfolio": [None, None], "re_optimized": [False, True]},
+        index=dates[[0, 2]],
+    )
+    rates = pd.Series([0.02, 0.04, 0.06, 0.08], index=dates[:-1])
+    readings = backtest_readings(results, value, value, steps=2, risk_free_rates=rates)
+    daily = value.pct_change().dropna().to_numpy()
+    excess = daily - (1 + rates.to_numpy()) ** (1 / 252) + 1
+    assert readings["sharpe_ratio"] == pytest.approx(
+        excess.mean() / daily.std(ddof=1) * np.sqrt(252)
+    )
+    downside = np.sqrt(np.mean(np.minimum(excess, 0) ** 2))
+    assert readings["sortino_ratio"] == pytest.approx(
+        excess.mean() / downside * np.sqrt(252)
+    )
+
+
+def test_cash_earns_the_risk_free_rates(tmp_path, prices_path):
+    # Fixed cash and no re-optimization after the first keep both runs' portfolios equal.
+    half_cash = dict(
+        arms=("no_fit-cpu",),
+        trials=1,
+        trigger="pct_change",
+        pct_change_threshold=-1.0,
+        cvar=dict(
+            w_min=0.0,
+            w_max=0.6,
+            c_min=0.5,
+            c_max=0.5,
+            L_tar=1.6,
+            T_tar=1.0,
+            confidence=0.95,
+            risk_aversion=1.0,
+        ),
+    )
+    zero = tmp_path / "zero.csv"
+    _write_rates(zero, 0.0, 0.0)
+    without = run_rebalancing_experiment(
+        _config(
+            tmp_path,
+            prices_path,
+            output=tmp_path / "without.parquet",
+            risk_free_rates=zero,
+            **half_cash,
+        )
+    )
+    high = tmp_path / "high.csv"
+    _write_rates(high, 0.5, 0.5)
+    earning = run_rebalancing_experiment(
+        _config(
+            tmp_path,
+            prices_path,
+            output=tmp_path / "earning.parquet",
+            risk_free_rates=high,
+            **half_cash,
+        )
+    )
+    growth = (1 + earning["total_return"]) / (1 + without["total_return"])
+    assert growth.iloc[0] == pytest.approx(1.5 ** (0.5 * TRADING_DAYS / 252), rel=1e-8)
+
+
+def test_other_risk_free_rates_are_refused(tmp_path, prices_path):
+    config = _config(tmp_path, prices_path, arms=("no_fit-cpu",), trials=1)
+    run_rebalancing_experiment(config)
+    _write_rates(config.rebalancing.risk_free_rates, 0.02, 0.03)
+    with pytest.raises(ValueError, match="risk_free_rates"):
+        run_rebalancing_experiment(config)
 
 
 def test_rebalancing_trials_are_independent_of_scenario_trials(

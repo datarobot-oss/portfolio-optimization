@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 DataRobot, Inc. and its affiliates. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 
@@ -18,6 +19,7 @@ import pandas as pd
 import seaborn as sns
 from sklearn.neighbors import KernelDensity
 
+from . import risk_free
 from .portfolio import Portfolio
 
 
@@ -37,8 +39,8 @@ class portfolio_backtester:
         Method for generating return scenarios
     benchmark_portfolios : list
         List of benchmark Portfolio objects for comparison
-    risk_free_rate : float
-        Risk-free rate for excess return calculations
+    risk_free_rate : float or pd.Series
+        Annual risk-free rate that cash earns and excess returns subtract
     """
 
     def __init__(
@@ -58,10 +60,14 @@ class portfolio_backtester:
         test_portfolio : Portfolio
             Portfolio object to backtest
         returns_dict : dict
-            Dictionary containing return data with keys: 'return_type', 'returns',
-            'dates', 'mean', 'covariance', 'tickers'
-        risk_free_rate : float, default 0.0
-            Risk-free rate for Sharpe and Sortino ratio calculations
+            Dictionary containing return data with keys: 'return_type', 'freq',
+            'returns', 'dates', 'mean', 'covariance', 'tickers'
+        risk_free_rate : float or pd.Series, default 0.0
+            Annual decimal risk-free rate: one rate, or rates indexed by quote
+            date (``risk_free.load_risk_free_rates``), which need
+            ``test_method="historical"``. Cash earns it and the Sharpe and
+            Sortino ratios subtract it, per period as ``risk_free.cash_returns``
+            converts it.
         test_method : str, default "historical"
             Method for return scenarios: "historical", "kde_simulation",
             or "gaussian_simulation"
@@ -97,11 +103,9 @@ class portfolio_backtester:
         self._rng = np.random.default_rng(seed)
 
         self._R = self._get_return_scenarios()
-
-        if self._return_type == "LOG":
-            self.risk_free_rate = np.log(1 + risk_free_rate)
-        elif self._return_type == "LINEAR":
-            self.risk_free_rate = risk_free_rate
+        self._cash_returns = self._get_cash_returns(
+            risk_free_rate, returns_dict["freq"]
+        )
 
         self._backtest_column_names = [
             "returns",
@@ -282,6 +286,38 @@ class portfolio_backtester:
             raise NotImplementedError("invalid test method!")
 
         return R
+
+    def _get_cash_returns(self, risk_free_rate, freq):
+        """
+        Cash return of each return scenario.
+
+        Historical scenarios end on their dates, so each earns the rate quoted
+        before its date; simulated scenarios are undated draws of one period,
+        so they all earn one scalar rate.
+
+        Returns
+        -------
+        np.ndarray
+            Cash return per scenario, in the units of the scenarios
+
+        Raises
+        ------
+        ValueError
+            If rates by date come with a simulated test method
+        """
+        if self.test_method == "historical":
+            return risk_free.cash_returns(
+                risk_free_rate, pd.DatetimeIndex(self._R.index), self._return_type, freq
+            )
+        if isinstance(risk_free_rate, pd.Series):
+            raise ValueError(
+                "Risk-free rates by date need test_method='historical'; "
+                "simulated scenarios have no dates."
+            )
+        return np.full(
+            len(self._R),
+            risk_free.period_returns(float(risk_free_rate), self._return_type, freq),
+        )
 
     def backtest_against_benchmarks(
         self,
@@ -523,7 +559,7 @@ class portfolio_backtester:
                 portfolio.weights, portfolio.cash
             )
             backtest_result = self._compute_return_metrics(
-                portfolio.name, portfolio_returns, portfolio.cash
+                portfolio.name, portfolio_returns
             )
         else:
             raise NotImplementedError(
@@ -532,7 +568,7 @@ class portfolio_backtester:
 
         return backtest_result
 
-    def _compute_return_metrics(self, portfolio_name, returns, cash):
+    def _compute_return_metrics(self, portfolio_name, returns):
         """
         Calculate portfolio performance metrics.
 
@@ -541,9 +577,7 @@ class portfolio_backtester:
         portfolio_name : str
             Name of the portfolio
         returns : pd.Series or np.ndarray
-            Portfolio returns time series
-        cash : float
-            Cash allocation in the portfolio
+            Portfolio returns time series, cash return included
 
         Returns
         -------
@@ -551,8 +585,8 @@ class portfolio_backtester:
             Single-row DataFrame with performance metrics including
             Sharpe ratio, Sortino ratio, and maximum drawdown
         """
-        mean_return = np.mean(returns) + cash * self.risk_free_rate
-        excess_returns = returns - self.risk_free_rate
+        mean_return = np.mean(returns)
+        excess_returns = returns - self._cash_returns
         returns_array = returns.to_numpy() if hasattr(returns, "to_numpy") else returns
         if self._return_type == "LINEAR":
             # Linear returns compound multiplicatively: (1+r1)*(1+r2)*...
@@ -611,7 +645,7 @@ class portfolio_backtester:
         np.ndarray
             Portfolio returns time series
         """
-        return self._R @ weights + self.risk_free_rate * cash
+        return self._R @ weights + self._cash_returns * cash
 
     def sharpe_ratio(self, excess_returns):
         """

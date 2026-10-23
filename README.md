@@ -226,6 +226,7 @@ task experiments:pilot                       # short run and report (configs/pil
 task experiments:run CONFIG=experiments/simulator_comparison/configs/full.yaml
 task experiments:report CONFIG=experiments/simulator_comparison/configs/full.yaml
 task experiments:test                        # CPU tests, no GPU or JointFM service needed
+task data:risk-free-rates                    # download the T-bill rates the rebalancing backtests need
 ```
 
 | Task | What it does |
@@ -238,6 +239,7 @@ task experiments:test                        # CPU tests, no GPU or JointFM serv
 | `experiments:fresh` | Deletes every output of a config (default `full.yaml`), then runs the scenario comparison, the rebalancing backtests, and both reports from scratch |
 | `experiments:timing` | Times JointFM on CPU against GPU from scratch (`timing.yaml`), one session per service: `GPU_URL` and `CPU_URL` |
 | `experiments:test` | Runs the experiments' CPU tests |
+| `data:risk-free-rates` | Downloads the daily 3-month Treasury bill rate (FRED DTB3) to `data/rates/dtb3.csv`, the rate cash earns in the rebalancing backtests |
 
 The experiments need the `experiments` extra (`pyarrow`, `pyyaml`, `scipy`, `tqdm`), which the tasks install. `CUDA_EXTRA` (default `cuda13`) selects the CUDA extra for the GPU arm. The experiments read `.env` like the library does: its JointFM selector picks the service of the `jointfm` arm, which runs as `jointfm-cpu` or `jointfm-gpu` depending on that service's device. `CUDA_VISIBLE_DEVICES` in `.env` picks the GPU. To compare JointFM on both devices, use `experiments:timing`, or run a config once per service, switching the selector in `.env` in between; the second run adds the other device's arm to the same results file. A selector switched while a session runs stops it.
 

@@ -283,6 +283,7 @@ def generate_samples_jointfm(
 def generate_cvar_data(
     returns_dict: dict,
     scenario_generation_settings: ScenarioGenerationSettings,
+    cash_return: float = 0.0,
 ):
     """Generate CvarData for CVaR optimization.
 
@@ -296,6 +297,9 @@ def generate_cvar_data(
     scenario_generation_settings : ScenarioGenerationSettings
         Configuration for scenario generation including number of scenarios,
         fit type, and KDE or JointFM settings.
+    cash_return : float, default 0.0
+        Return of cash over one period, in the units of the returns
+        (``risk_free.cash_returns``); becomes ``CvarData.cash_return``.
 
     Returns
     -------
@@ -364,7 +368,7 @@ def generate_cvar_data(
             "Unsupported fit type: must be from gaussian, kde, no_fit, or jointfm."
         )
 
-    cvar_data = CvarData(mean=return_mean, R=R, p=p)
+    cvar_data = CvarData(mean=return_mean, R=R, p=p, cash_return=cash_return)
 
     returns_dict["cvar_data"] = cvar_data
 

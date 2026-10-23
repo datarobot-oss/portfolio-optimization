@@ -248,9 +248,10 @@ class CVaR(base_optimizer.BaseOptimizer):
         self.cardinality_param = cp.Parameter(name="cardinality")
 
         # set up expressions used in the optimization process
-        self.expected_ptf_returns = self.data.mean.T @ self.w
+        cash_ptf_return = self.data.cash_return * cp.sum(self.c)
+        self.expected_ptf_returns = self.data.mean.T @ self.w + cash_ptf_return
         self.cvar_risk = t + 1 / (1 - self.params.confidence) * self.data.p @ u
-        scenario_ptf_returns = self.data.R.T @ self.w
+        scenario_ptf_returns = self.data.R.T @ self.w + cash_ptf_return
 
         # Add variable bounds constraints (only if using parameter constraints)
         constraints = []
@@ -448,15 +449,20 @@ class CVaR(base_optimizer.BaseOptimizer):
         problem.addConstraint(budget_expr == 1.0, name="budget_constraint")
         timing_dict["budget_constraint"] = time.time() - start_time
 
-        # Add CVaR scenario constraints: u[j] + t >= -sum(R[i,j] * w[i])
-        # Rewritten as: t + u[j] + sum(R[i,j] * w[i]) >= 0
+        # Add CVaR scenario constraints: u[j] + t >= -(sum(R[i,j] * w[i]) + r_c * c)
+        # Rewritten as: t + u[j] + sum(R[i,j] * w[i]) + r_c * c >= 0
         start_time = time.time()
+        cash_return = float(self.data.cash_return)
         for j in range(num_scen):
             # Build constraint using LinearExpression
-            scenario_vars = [variables["t"], variables["u"][j]] + variables["w"]
-            scenario_coeffs = [1.0, 1.0] + [
-                float(self.data.R[i, j]) for i in range(num_assets)
-            ]
+            scenario_vars = (
+                [variables["t"], variables["u"][j]] + variables["w"] + [variables["c"]]
+            )
+            scenario_coeffs = (
+                [1.0, 1.0]
+                + [float(self.data.R[i, j]) for i in range(num_assets)]
+                + [cash_return]
+            )
             scenario_expr = LinearExpression(scenario_vars, scenario_coeffs, 0.0)
             problem.addConstraint(scenario_expr >= 0.0, name=f"cvar_scenario_{j}")
         timing_dict["cvar_constraints"] = time.time() - start_time
@@ -617,7 +623,9 @@ class CVaR(base_optimizer.BaseOptimizer):
         # Build expected return expression using LinearExpression
         expected_return_coeffs = [float(self.data.mean[i]) for i in range(num_assets)]
         expected_return_expr = LinearExpression(
-            variables["w"], expected_return_coeffs, 0.0
+            variables["w"] + [variables["c"]],
+            expected_return_coeffs + [cash_return],
+            0.0,
         )
 
         # Build CVaR expression using LinearExpression
@@ -632,7 +640,9 @@ class CVaR(base_optimizer.BaseOptimizer):
         if self.params.cvar_limit is None:
             # Minimize: risk_aversion * CVaR - expected_return
             # Combine into single LinearExpression: risk_aversion * cvar_coeffs - expected_return_coeffs
-            obj_vars = [variables["t"]] + variables["u"] + variables["w"]
+            obj_vars = (
+                [variables["t"]] + variables["u"] + variables["w"] + [variables["c"]]
+            )
             obj_coeffs = (
                 [float(self.params.risk_aversion)]  # t coefficient
                 + [
@@ -643,6 +653,7 @@ class CVaR(base_optimizer.BaseOptimizer):
                 + [
                     -float(self.data.mean[i]) for i in range(num_assets)
                 ]  # w coefficients (negative for return)
+                + [-cash_return]  # c coefficient (negative for return)
             )
             objective_expr = LinearExpression(obj_vars, obj_coeffs, 0.0)
             problem.setObjective(objective_expr, sense=MINIMIZE)
@@ -730,7 +741,7 @@ class CVaR(base_optimizer.BaseOptimizer):
         cash = self._cuopt_variables["c"].getValue()
 
         # Calculate performance metrics
-        expected_return = np.dot(self.data.mean, weights)
+        expected_return = np.dot(self.data.mean, weights) + self.data.cash_return * cash
 
         # Calculate CVaR
         t_value = self._cuopt_variables["t"].getValue()

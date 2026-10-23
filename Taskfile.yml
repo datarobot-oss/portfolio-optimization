@@ -126,6 +126,16 @@ tasks:
         vars: {CONFIG: '{{.CONFIG}}'}
       - echo "experiments:pilot succeeded for {{.CONFIG}}"
 
+  data:risk-free-rates:
+    desc: >-
+      Download the daily 3-month Treasury bill rate (FRED DTB3) to
+      data/rates/dtb3.csv, the risk-free rates the rebalancing configs read
+    cmds:
+      - >-
+        uv run python -c "from portfolio_optimization.risk_free import
+        download_risk_free_rates; download_risk_free_rates('data/rates/dtb3.csv')"
+      - echo "data:risk-free-rates succeeded for data/rates/dtb3.csv"
+
   experiments:test:
     desc: CPU tests of the experiments (no GPU or JointFM service needed)
     cmds:

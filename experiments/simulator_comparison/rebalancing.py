@@ -5,15 +5,20 @@
 
 Each trial's 100 assets (the draw the scenario comparison uses) trade over a
 window of ``trading_days`` that the trial draws at random, through the
-library's ``rebalance_portfolio`` with the percentage-change trigger: every
-``look_forward_window`` trading days the portfolio is re-optimized when the
-last step lost more than ``pct_change_threshold``. Every arm of a trial gets
+library's ``rebalance_portfolio``: after every ``look_forward_window`` trading
+days the configured ``trigger`` decides whether the portfolio is re-optimized,
+always (``every_step``) or after losses beyond ``pct_change_threshold``
+(``pct_change``). Every arm of a trial gets
 the same window, CVaR constraints, risk aversion, and scenario seed, so arms
 differ only in the scenarios their simulator generates.
 
 The risk aversion is the configured base scaled once per trial by the best
 single-asset return/CVaR ratio of the history before the window, as the
 rebalancing notebook does, and kept for every optimization of the trial.
+
+Cash earns the dated risk-free rates of ``risk_free_rates``: every optimization
+credits it with the rate quoted on its date, the backtest accrues it day by
+day, and the Sharpe and Sortino ratios subtract the same daily rates.
 
 Portfolio values follow the library's backtester, which values ``LOG`` returns
 as ``exp(cumsum(R_log @ w))``: a value that cannot reach zero, which
@@ -22,6 +27,7 @@ understates the losses of short positions. That bias is accepted for now.
 
 import argparse
 import copy
+import hashlib
 import sys
 import time
 from collections.abc import Sequence
@@ -31,7 +37,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from portfolio_optimization import cvar_utils, utils
+from portfolio_optimization import cvar_utils, risk_free, utils
 from portfolio_optimization.cvar_parameters import CvarParameters
 from portfolio_optimization.gpu import apply_gpu_selection
 from portfolio_optimization.settings import ApiSettings, ScenarioGenerationSettings
@@ -63,7 +69,7 @@ from .trials import (
 )
 
 KEY_COLUMNS = ("trial", "arm")
-TRADING_DAYS_PER_YEAR = 252
+TRADING_DAYS_PER_YEAR = risk_free.TRADING_DAYS_PER_YEAR
 # Per-run readings; step_returns holds the per-step values behind the first two.
 METRICS = (
     "mean_step_return",
@@ -134,7 +140,7 @@ def backtest_readings(
     value: pd.Series,
     buy_and_hold: pd.Series,
     steps: int,
-    risk_free_rate: float,
+    risk_free_rates: pd.Series,
 ) -> dict:
     """Readings of one rebalancing run.
 
@@ -145,7 +151,7 @@ def backtest_readings(
     was set up. The annualized readings use ``TRADING_DAYS_PER_YEAR`` and the
     daily returns: annualized return compounds the total return over the
     window's length; Sharpe and Sortino divide the mean daily return in excess
-    of ``risk_free_rate`` (annual, compounded to a daily rate) by the standard
+    of the day's risk-free rate (``risk_free.cash_returns``) by the standard
     deviation of daily returns and by their downside deviation (root mean
     square of the negative excess returns), scaled by the square root of the
     trading days per year; Calmar divides annualized return by maximum
@@ -163,10 +169,13 @@ def backtest_readings(
     if not np.isfinite(at).all():
         raise ValueError("A step boundary has no portfolio value.")
     step_returns = at[1:] / at[:-1] - 1
-    daily = value.pct_change().dropna().to_numpy()
+    daily_series = value.pct_change().dropna()
+    daily = daily_series.to_numpy()
     total_return = float(value.iloc[-1] / value.iloc[0] - 1)
     annualized_return = (1 + total_return) ** (TRADING_DAYS_PER_YEAR / len(daily)) - 1
-    excess = daily - ((1 + risk_free_rate) ** (1 / TRADING_DAYS_PER_YEAR) - 1)
+    excess = daily - risk_free.cash_returns(
+        risk_free_rates, pd.DatetimeIndex(daily_series.index), "LINEAR"
+    )
     downside = np.sqrt(np.mean(np.minimum(excess, 0.0) ** 2))
     max_drawdown = float((1 - value / value.cummax()).max())
     per_year = np.sqrt(TRADING_DAYS_PER_YEAR)
@@ -200,6 +209,7 @@ def run_backtest(
     universe_path: Path,
     params: CvarParameters,
     config: ExperimentConfig,
+    risk_free_rates: pd.Series,
 ) -> dict:
     """One rebalancing run of ``arm`` on a trial's universe and window."""
     from portfolio_optimization import rebalance
@@ -223,10 +233,11 @@ def run_backtest(
         cvar_params=copy.deepcopy(params),
         solver_settings=solver_settings(rebalancing.solver),
         re_optimize_criteria={
-            "type": "pct_change",
+            "type": rebalancing.trigger,
             "threshold": rebalancing.pct_change_threshold,
         },
         api_settings=ApiSettings(scale_risk_aversion=False),
+        risk_free_rate=risk_free_rates,
     )
     results, _, value = rebalancer.re_optimize(
         transaction_cost_factor=rebalancing.transaction_cost
@@ -237,7 +248,7 @@ def run_backtest(
         value,
         rebalancer.buy_and_hold_cumulative_portfolio_value,
         rebalancing.trading_days // rebalancing.look_forward_window,
-        rebalancing.risk_free_rate,
+        risk_free_rates,
     )
     return {
         "trial": trial.index,
@@ -268,6 +279,12 @@ def rebalancing_identity(
     identity["rebalancing"] = config.rebalancing.model_dump(
         mode="json", exclude={"output", "arms", "trials"}
     )
+    identity["risk_free_rates"] = {
+        "file": config.rebalancing.risk_free_rates.name,
+        "sha256": hashlib.sha256(
+            config.rebalancing.risk_free_rates.read_bytes()
+        ).hexdigest(),
+    }
     return identity
 
 
@@ -288,6 +305,7 @@ def run_rebalancing_experiment(
     """
     rebalancing = config.rebalancing
     prices = load_prices(config.prices)
+    rates = risk_free.load_risk_free_rates(rebalancing.risk_free_rates)
     arms, services = resolve_arms(rebalancing.arms)
     identity = rebalancing_identity(config, arms, prices, services)
     frame = None
@@ -344,7 +362,7 @@ def run_rebalancing_experiment(
             trials = {index: (trial, window, universe_path, params)}
         if arm.fit_type == "jointfm":
             verify_jointfm_service(arm, services[arm.name])
-        row = run_backtest(arm, *trials[index], config)
+        row = run_backtest(arm, *trials[index], config, rates)
         if arm.fit_type == "jointfm":
             verify_jointfm_service(arm, services[arm.name])
         new = pd.DataFrame([row])
