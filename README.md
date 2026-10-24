@@ -221,6 +221,7 @@ See [`notebooks/cvar_jointfm.ipynb`](notebooks/cvar_jointfm.ipynb) for a complet
 A YAML file under [`experiments/simulator_comparison/configs/`](experiments/simulator_comparison/configs/) describes each experiment completely, validated by a pydantic model. The [`Taskfile.yml`](Taskfile.yml) at the repository root runs and evaluates experiments with [Task](https://taskfile.dev/installation/), so its commands only name the config. `task --list` shows every task.
 
 ```bash
+task experiments:all                         # run and report everything of full.yaml, resuming its results
 task experiments:fresh                       # delete full.yaml's outputs, run and report everything
 task experiments:pilot                       # short run and report (configs/pilot.yaml)
 task experiments:run CONFIG=experiments/simulator_comparison/configs/full.yaml
@@ -236,7 +237,8 @@ task data:risk-free-rates                    # download the T-bill rates the reb
 | `experiments:report` | Writes the tables and plots of a config's results. `EXCLUDE` leaves out arms, for example one whose session is still running (`EXCLUDE=jointfm-cpu`). |
 | `experiments:rebalance` | Runs a config's rebalancing backtests (each trial's universe, once per simulator) and writes their report: returns, drawdown, Sharpe, Sortino, and Calmar ratios, turnover |
 | `experiments:rebalance-report` | Writes the rebalancing report of a config's results without running anything |
-| `experiments:fresh` | Deletes every output of a config (default `full.yaml`), then runs the scenario comparison, the rebalancing backtests, and both reports from scratch |
+| `experiments:all` | Runs a config's scenario comparison (default `full.yaml`), the rebalancing backtests, and both reports. Rerunning resumes both results files, so it continues an interrupted `experiments:fresh`. |
+| `experiments:fresh` | Deletes every output of a config (default `full.yaml`), then runs `experiments:all` from scratch |
 | `experiments:timing` | Times JointFM on CPU against GPU from scratch (`timing.yaml`), one session per service: `GPU_URL` and `CPU_URL` |
 | `experiments:test` | Runs the experiments' CPU tests |
 | `data:risk-free-rates` | Downloads the daily 3-month Treasury bill rate (FRED DTB3) to `data/rates/dtb3.csv`, the rate cash earns in the rebalancing backtests |

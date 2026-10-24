@@ -284,7 +284,7 @@ def pending_work(
     """Every (trial, origin) with arms not yet in the results, in run order.
 
     Trials are cheap seeded draws, so all are drawn up front and the progress
-    bar knows the remaining work, also when a run resumes.
+    bar knows how much of the run is already done, also when a run resumes.
     """
     work = []
     for index in range(config.trials):
@@ -365,10 +365,13 @@ def run_experiment(
     work = pending_work(prices, config, arms, done)
     warmed_up = set()
     added = 0
+    total = config.trials * config.origins
     progress = tqdm(
         work,
         desc="simulator comparison",
         unit="origin",
+        total=total,
+        initial=total - len(work),
         mininterval=PROGRESS_INTERVAL_TERMINAL
         if sys.stderr.isatty()
         else PROGRESS_INTERVAL_LOG,

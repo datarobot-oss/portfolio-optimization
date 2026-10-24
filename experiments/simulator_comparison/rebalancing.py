@@ -329,10 +329,13 @@ def run_rebalancing_experiment(
     ]
     trials: dict[int, tuple] = {}
     added = 0
+    total = rebalancing.trials * len(arms)
     progress = tqdm(
         work,
         desc="rebalancing",
         unit="run",
+        total=total,
+        initial=total - len(work),
         mininterval=PROGRESS_INTERVAL_TERMINAL
         if sys.stderr.isatty()
         else PROGRESS_INTERVAL_LOG,

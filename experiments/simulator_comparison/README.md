@@ -21,19 +21,20 @@ A YAML file in [`configs/`](configs/) describes a run completely: data, trial an
 The JointFM arm and the cuML arm read `.env` in the repository root, the file the library's README describes: its JointFM selector picks the service, and `CUDA_VISIBLE_DEVICES` picks the GPU. The JointFM arm takes its expected returns from its own scenarios, the library's default (`JointFMSettings.expected_return="scenario"`); the other arms use the look-back window's mean, which is also what their scenarios are centered on. To compare JointFM on both devices, start a service on each, serving the same checkpoint. Run the config with `.env` pointing at one, then point `.env` at the other and run the same config again. The second run adds the other device's JointFM arm to the same results file and skips every row already in it. The runner refuses JointFM arms whose services serve different checkpoints. Before every JointFM call it checks that `.env` still selects the service recorded at session start, so a selector switched during a session stops the run instead of recording the other device's calls under this arm.
 
 ```bash
+task experiments:all                         # full.yaml: run and report everything, resuming its results
 task experiments:fresh                       # full.yaml: delete its outputs, run and report everything
 task experiments:pilot                       # configs/pilot.yaml: run, then report
 task experiments:run CONFIG=experiments/simulator_comparison/configs/full.yaml
 task experiments:timing GPU_URL=http://127.0.0.1:8080 CPU_URL=http://127.0.0.1:8081
 ```
 
-`experiments:fresh` deletes every output the config names (scenario results and report, rebalancing results, report, and universes; [`clean.py`](clean.py) prints each path) and then runs the scenario comparison, its report, and the rebalancing backtests with their report. Use it after a change of code or library defaults, which the resumable runs would otherwise refuse or mix into old results.
+`experiments:fresh` deletes every output the config names (scenario results and report, rebalancing results, report, and universes; [`clean.py`](clean.py) prints each path) and then runs `experiments:all`: the scenario comparison, its report, and the rebalancing backtests with their report. Use it after a change of code or library defaults, which the resumable runs would otherwise refuse or mix into old results. To continue an interrupted `experiments:fresh`, run `experiments:all`, which resumes both results files; rerunning `experiments:fresh` would delete what was already measured.
 
 `experiments:timing` measures JointFM on both devices from scratch with [`timing.yaml`](configs/timing.yaml): one session against `GPU_URL`, one against `CPU_URL`, each set as `JOINTFM_LOCAL_BASE_URL` over `.env`, then the report and its CPU-to-GPU speedup. `.env` must use the local selector or none, because selectors from the process and `.env` count together.
 
 Without Task, the same run is `uv run --extra cuda13 --extra jointfm --extra experiments python -m experiments.simulator_comparison --config <config>`.
 
-A progress bar on stderr counts the remaining forecast origins, also after a resume, and shows each arm's latest generation time. When stderr is not a terminal, it refreshes once a minute so a log file stays short.
+A progress bar on stderr counts forecast origins against the whole run, so a resumed run starts at the origins already in the results file, and shows each arm's latest generation time. The rebalancing bar counts runs the same way. When stderr is not a terminal, it refreshes once a minute so a log file stays short.
 
 Run the arms on an otherwise idle host. The arms at one origin run one after another, but other load on the CPU or the GPUs still shifts their timings.
 

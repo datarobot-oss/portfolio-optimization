@@ -71,22 +71,33 @@ tasks:
         experiments.simulator_comparison.rebalancing_report --config {{.CONFIG}}
       - echo "experiments:rebalance-report succeeded for {{.CONFIG}}"
 
+  experiments:all:
+    desc: >-
+      Run the scenario comparison of CONFIG (default full.yaml), its report,
+      and the rebalancing backtests with their report, resuming both results
+      files
+    vars:
+      CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/full.yaml")}}'
+    cmds:
+      - task: experiments:run
+        vars: {CONFIG: '{{.CONFIG}}'}
+      - task: experiments:report
+        vars: {CONFIG: '{{.CONFIG}}'}
+      - task: experiments:rebalance
+        vars: {CONFIG: '{{.CONFIG}}'}
+      - echo "experiments:all succeeded for {{.CONFIG}}"
+
   experiments:fresh:
     desc: >-
-      Delete every output of CONFIG (default full.yaml), then run the scenario
-      comparison, its report, and the rebalancing backtests with their report
-      from scratch
+      Delete every output of CONFIG (default full.yaml), then run
+      experiments:all from scratch
     vars:
       CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/full.yaml")}}'
     cmds:
       - >-
         uv run --extra experiments python -m experiments.simulator_comparison.clean
         --config {{.CONFIG}}
-      - task: experiments:run
-        vars: {CONFIG: '{{.CONFIG}}'}
-      - task: experiments:report
-        vars: {CONFIG: '{{.CONFIG}}'}
-      - task: experiments:rebalance
+      - task: experiments:all
         vars: {CONFIG: '{{.CONFIG}}'}
       - echo "experiments:fresh succeeded for {{.CONFIG}}"
 

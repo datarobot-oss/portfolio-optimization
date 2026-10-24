@@ -106,7 +106,9 @@ LINE_WIDTH = 2
 JITTER = 0.12
 # Fixed so the dot jitter is identical on every re-render.
 JITTER_SEED = 0
-TIMING_ALPHA = 0.5
+BOX_WIDTH = 0.3
+# Whiskers at the minimum and maximum, so a box draws no outlier dots.
+BOX_WHISKERS = (0, 100)
 
 
 def _duration(seconds: float) -> str:
@@ -205,6 +207,27 @@ def _dots(ax, x: float, values: np.ndarray, style: ArmStyle, rng, alpha=1.0) -> 
         edgecolor=SURFACE if style.filled else style.color,
         linewidth=MARKER_EDGE,
         alpha=alpha,
+        zorder=3,
+    )
+
+
+def _box(ax, x: float, values: np.ndarray, style: ArmStyle) -> None:
+    line = {"color": style.color, "linewidth": 1}
+    ax.boxplot(
+        values,
+        positions=[x],
+        widths=BOX_WIDTH,
+        whis=BOX_WHISKERS,
+        patch_artist=True,
+        boxprops={
+            "facecolor": style.color if style.filled else SURFACE,
+            "edgecolor": style.color,
+            "linewidth": 1,
+        },
+        medianprops={**line, "color": SURFACE if style.filled else style.color},
+        whiskerprops=line,
+        capprops=line,
+        manage_ticks=False,
         zorder=3,
     )
 
@@ -505,14 +528,13 @@ def plot_timing(
     directory: Path,
 ):
     """Seconds per scenario-generation call per arm, with GPU speedups."""
-    rng = np.random.default_rng(JITTER_SEED)
     timed = frame[~frame["warmup"]]
     figure, axes = _figure(12, 6)
     ax = axes[0, 0]
     positions = {style.name: position for position, style in enumerate(styles)}
     for position, style in enumerate(styles):
         seconds = timed.loc[timed["arm"] == style.name, "seconds"].to_numpy()
-        _dots(ax, position, seconds, style, rng, alpha=TIMING_ALPHA)
+        _box(ax, position, seconds, style)
         row = means.loc[style.name]
         ax.vlines(
             position + 0.3,
@@ -555,7 +577,8 @@ def plot_timing(
     _title(
         ax,
         "Scenario-generation time",
-        "each call without warm-up; bar: mean and 95 % interval over trials",
+        "calls without warm-up; box: median, quartiles, and range;"
+        " bar: mean and 95 % interval over trials",
     )
     _device_legend(figure)
     return _save(figure, directory, "timing")
