@@ -223,7 +223,8 @@ A YAML file under [`experiments/simulator_comparison/configs/`](experiments/simu
 ```bash
 task experiments:all                         # run and report everything of full.yaml, resuming its results
 task experiments:fresh                       # delete full.yaml's outputs, run and report everything
-task experiments:pilot                       # short run and report (configs/pilot.yaml)
+task experiments:pilot                       # experiments:all of the short configs/pilot.yaml
+task experiments:pilot-fresh                 # delete pilot.yaml's outputs, run and report everything
 task experiments:run CONFIG=experiments/simulator_comparison/configs/full.yaml
 task experiments:report CONFIG=experiments/simulator_comparison/configs/full.yaml
 task experiments:test                        # CPU tests, no GPU or JointFM service needed
@@ -232,7 +233,8 @@ task data:risk-free-rates                    # download the T-bill rates the reb
 
 | Task | What it does |
 | --- | --- |
-| `experiments:pilot` | Runs a config (default `pilot.yaml`), then writes its report |
+| `experiments:pilot` | Runs `experiments:all` on a short config (default `pilot.yaml`) to measure cost per arm and noise before sizing the full run |
+| `experiments:pilot-fresh` | Deletes every output of a config (default `pilot.yaml`), then runs `experiments:pilot` from scratch |
 | `experiments:run` | Runs a config (default `full.yaml`). Rerunning resumes its results file, and a larger `trials` extends it. |
 | `experiments:report` | Writes the tables and plots of a config's results. `EXCLUDE` leaves out arms, for example one whose session is still running (`EXCLUDE=jointfm-cpu`). |
 | `experiments:rebalance` | Runs a config's rebalancing backtests (each trial's universe, once per simulator) and writes their report: returns, drawdown, Sharpe, Sortino, and Calmar ratios, turnover |

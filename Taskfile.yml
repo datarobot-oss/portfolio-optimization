@@ -126,16 +126,26 @@ tasks:
 
   experiments:pilot:
     desc: >-
-      Short run and report (default pilot.yaml) to measure cost per arm and
-      noise before sizing the full run
+      experiments:all of a short config (default pilot.yaml), resuming both
+      results files, to measure cost per arm and noise before sizing the full
+      run
     vars:
       CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/pilot.yaml")}}'
     cmds:
-      - task: experiments:run
-        vars: {CONFIG: '{{.CONFIG}}'}
-      - task: experiments:report
+      - task: experiments:all
         vars: {CONFIG: '{{.CONFIG}}'}
       - echo "experiments:pilot succeeded for {{.CONFIG}}"
+
+  experiments:pilot-fresh:
+    desc: >-
+      Delete every output of CONFIG (default pilot.yaml), then run
+      experiments:pilot from scratch
+    vars:
+      CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/pilot.yaml")}}'
+    cmds:
+      - task: experiments:fresh
+        vars: {CONFIG: '{{.CONFIG}}'}
+      - echo "experiments:pilot-fresh succeeded for {{.CONFIG}}"
 
   data:risk-free-rates:
     desc: >-

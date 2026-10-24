@@ -23,12 +23,13 @@ The JointFM arm and the cuML arm read `.env` in the repository root, the file th
 ```bash
 task experiments:all                         # full.yaml: run and report everything, resuming its results
 task experiments:fresh                       # full.yaml: delete its outputs, run and report everything
-task experiments:pilot                       # configs/pilot.yaml: run, then report
+task experiments:pilot                       # configs/pilot.yaml: run and report everything, resuming its results
+task experiments:pilot-fresh                 # configs/pilot.yaml: delete its outputs, run and report everything
 task experiments:run CONFIG=experiments/simulator_comparison/configs/full.yaml
 task experiments:timing GPU_URL=http://127.0.0.1:8080 CPU_URL=http://127.0.0.1:8081
 ```
 
-`experiments:fresh` deletes every output the config names (scenario results and report, rebalancing results, report, and universes; [`clean.py`](clean.py) prints each path) and then runs `experiments:all`: the scenario comparison, its report, and the rebalancing backtests with their report. Use it after a change of code or library defaults, which the resumable runs would otherwise refuse or mix into old results. To continue an interrupted `experiments:fresh`, run `experiments:all`, which resumes both results files; rerunning `experiments:fresh` would delete what was already measured.
+`experiments:fresh` (and `experiments:pilot-fresh` for `pilot.yaml`) deletes every output the config names (scenario results and report, rebalancing results, report, and universes; [`clean.py`](clean.py) prints each path) and then runs `experiments:all`: the scenario comparison, its report, and the rebalancing backtests with their report. Use it after a change of code or library defaults, which the resumable runs would otherwise refuse or mix into old results. To continue an interrupted `experiments:fresh`, run `experiments:all`, which resumes both results files; rerunning `experiments:fresh` would delete what was already measured.
 
 `experiments:timing` measures JointFM on both devices from scratch with [`timing.yaml`](configs/timing.yaml): one session against `GPU_URL`, one against `CPU_URL`, each set as `JOINTFM_LOCAL_BASE_URL` over `.env`, then the report and its CPU-to-GPU speedup. `.env` must use the local selector or none, because selectors from the process and `.env` count together.
 
