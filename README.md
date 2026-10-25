@@ -221,6 +221,7 @@ See [`notebooks/cvar_jointfm.ipynb`](notebooks/cvar_jointfm.ipynb) for a complet
 A YAML file under [`experiments/simulator_comparison/configs/`](experiments/simulator_comparison/configs/) describes each experiment completely, validated by a pydantic model. The [`Taskfile.yml`](Taskfile.yml) at the repository root runs and evaluates experiments with [Task](https://taskfile.dev/installation/), so its commands only name the config. `task --list` shows every task.
 
 ```bash
+task setup                                   # reconcile uv.lock with pyproject.toml, install everything the tasks use
 task experiments:all                         # run and report everything of full.yaml, resuming its results
 task experiments:fresh                       # delete full.yaml's outputs, run and report everything
 task experiments:pilot                       # experiments:all of the short configs/pilot.yaml
@@ -233,6 +234,8 @@ task data:risk-free-rates                    # download the T-bill rates the reb
 
 | Task | What it does |
 | --- | --- |
+| `setup` | Runs `uv lock`, which changes `uv.lock` only where `pyproject.toml` changed and keeps every other pin, then installs the locked environment with the `CUDA_EXTRA`, `jointfm`, and `experiments` extras and the `dev` and `notebooks` groups. It reports whether `uv.lock` has uncommitted changes. |
+| `lock:upgrade` | Moves every pin in `uv.lock` to the newest version `pyproject.toml` allows, installs it, and runs `experiments:test`. Run it deliberately, between experiments whose results are compared, and commit `uv.lock` once the tests and a pilot run pass. |
 | `experiments:pilot` | Runs `experiments:all` on a short config (default `pilot.yaml`) to measure cost per arm and noise before sizing the full run |
 | `experiments:pilot-fresh` | Deletes every output of a config (default `pilot.yaml`), then runs `experiments:pilot` from scratch |
 | `experiments:run` | Runs a config (default `full.yaml`). Rerunning resumes its results file, and a larger `trials` extends it. |

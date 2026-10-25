@@ -10,6 +10,10 @@
 # file loads none: services and GPUs are configured in .env alone. Only
 # experiments:timing sets JOINTFM_LOCAL_BASE_URL per session, which overrides
 # the same variable in .env.
+#
+# Every task ends with an echo "<task> succeeded ..." command, so a finished
+# task says so explicitly; Task stops at the first failing command, so the
+# message appears only when every command before it succeeded.
 
 version: '3'
 
@@ -19,13 +23,44 @@ vars:
   CUDA_EXTRA: '{{.CUDA_EXTRA | default "cuda13"}}'
   # uv run installs what the experiment needs without removing anything else.
   UV_EXPERIMENTS: uv run --extra {{.CUDA_EXTRA}} --extra jointfm --extra experiments
+  # Everything the tasks, the tests, and the notebooks use, in one environment.
+  UV_SYNC_ALL: >-
+    uv sync --locked --extra {{.CUDA_EXTRA}} --extra jointfm --extra experiments
+    --group dev --group notebooks
+  # Visibility for a lock the task rewrote; committing it stays a manual step.
+  LOCK_STATUS: >-
+    git diff --quiet -- uv.lock && echo "uv.lock has no uncommitted changes"
+    || echo "uv.lock has uncommitted changes: review git diff uv.lock and commit it"
 
 tasks:
   default:
     desc: List the available tasks
     cmds:
       - task --list
+      - echo "default succeeded"
     silent: true
+
+  setup:
+    desc: >-
+      Reconcile uv.lock with pyproject.toml without upgrading pinned versions,
+      then install the locked environment with every extra and group the tasks,
+      tests, and notebooks use (CUDA_EXTRA selects the CUDA extra)
+    cmds:
+      - uv lock
+      - '{{.UV_SYNC_ALL}}'
+      - '{{.LOCK_STATUS}}'
+      - echo "setup succeeded with --extra {{.CUDA_EXTRA}}"
+
+  lock:upgrade:
+    desc: >-
+      Move every pin in uv.lock to the newest version pyproject.toml allows,
+      install it, and run the CPU tests; review and commit uv.lock yourself
+    cmds:
+      - uv lock --upgrade
+      - '{{.UV_SYNC_ALL}}'
+      - task: experiments:test
+      - '{{.LOCK_STATUS}}'
+      - echo "lock:upgrade succeeded with --extra {{.CUDA_EXTRA}}"
 
   experiments:run:
     desc: >-
