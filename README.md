@@ -221,7 +221,7 @@ See [`notebooks/cvar_jointfm.ipynb`](notebooks/cvar_jointfm.ipynb) for a complet
 A YAML file under [`experiments/simulator_comparison/configs/`](experiments/simulator_comparison/configs/) describes each experiment completely, validated by a pydantic model. The [`Taskfile.yml`](Taskfile.yml) at the repository root runs and evaluates experiments with [Task](https://taskfile.dev/installation/), so its commands only name the config. `task --list` shows every task.
 
 ```bash
-task setup                                   # reconcile uv.lock with pyproject.toml, install everything the tasks use
+task setup                                   # reconcile uv.lock, install everything the tasks use, the pre-commit hooks, and the Jupyter kernel
 task experiments:all                         # run and report everything of full.yaml, resuming its results
 task experiments:fresh                       # delete full.yaml's outputs, run and report everything
 task experiments:pilot                       # experiments:all of the short configs/pilot.yaml

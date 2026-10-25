@@ -3,10 +3,12 @@
 
 """Report of a simulator-comparison results file: tables and plots.
 
-It reads only the results file, so it re-renders without rerunning any arm,
-and answers which arm gives the most realistic scenarios on average (by the
-energy score of the joint next-day distribution) and what each arm costs to
-generate. Run it as ``python -m experiments.simulator_comparison.report``.
+It reads the results file and the price file they were measured on, so it
+re-renders without rerunning any arm. It answers which arm gives the most
+realistic scenarios on average (by the energy score of the joint next-day
+distribution), how every reading changes across market regimes of the origins
+(``regimes``), and what each arm costs to generate. Run it as
+``python -m experiments.simulator_comparison.report``.
 
 Colors follow the simulator, so the CPU and GPU arm of one simulator share a
 hue; the device is the second channel: filled marks are CPU, hollow marks GPU,
@@ -41,7 +43,17 @@ from .analysis import (
     timing,
 )
 from .config import load_config
-from .scores import PIT_BINS, ScenarioScores
+from .regimes import (
+    FEATURES,
+    OVERALL,
+    REGIMES,
+    check_prices,
+    origin_features,
+    regime_readings,
+    terciles,
+)
+from .runner import load_prices
+from .scores import PIT_BINS, TRAILING_STD_WINDOW, ScenarioScores
 from .table import read_results
 
 SURFACE = "#fcfcfb"
@@ -95,6 +107,15 @@ SCORE_LABELS = {
     ),
 }
 SKILL_LABELS = {"energy_score": "Energy-score skill", "crps": "CRPS skill"}
+FEATURE_LABELS = {
+    "window_correlation": "look-back window's mean pairwise correlation",
+    "volatility_ratio": f"volatility ratio, last {TRAILING_STD_WINDOW} returns "
+    "over the whole look-back window",
+    "correlation_change": "change of the mean pairwise correlation over the "
+    "forward returns (looks ahead)",
+}
+# Share of a regime column that one regime's arms spread across.
+REGIME_GROUP_WIDTH = 0.7
 FIGURE_DPI = 150
 # Scatter area in points^2; a 6 pt (8 px at 96 dpi) marker.
 MARKER_AREA = 36
@@ -296,6 +317,31 @@ def _device_legend(figure) -> None:
             label=f"{device} ({'filled' if device == 'CPU' else 'hollow'})",
         )
         for device in DEVICE_ORDER
+    ]
+    figure.legend(
+        handles=handles,
+        loc="outside lower center",
+        ncols=len(handles),
+        frameon=False,
+        fontsize=8,
+        labelcolor=INK_SECONDARY,
+    )
+
+
+def _arm_legend(figure, styles: Sequence[ArmStyle]) -> None:
+    handles = [
+        Line2D(
+            [],
+            [],
+            marker="o",
+            linestyle="",
+            markersize=7,
+            markerfacecolor=style.color if style.filled else SURFACE,
+            markeredgecolor=style.color,
+            markeredgewidth=MARKER_EDGE,
+            label=style.inline_label,
+        )
+        for style in styles
     ]
     figure.legend(
         handles=handles,
@@ -584,6 +630,139 @@ def plot_timing(
     return _save(figure, directory, "timing")
 
 
+def _regime_panel(
+    ax,
+    columns: Sequence[tuple[str, str]],
+    labels: Sequence[str],
+    arms: Sequence[ArmStyle],
+    values: dict[tuple[str, str, str], tuple[float, float, float]],
+    *,
+    reference: float,
+) -> None:
+    """One column per (feature, regime), each arm as a point with its interval.
+
+    ``values`` maps (feature, regime, arm) to (estimate, interval low, interval
+    high); a horizontal line marks ``reference``, and a thin line separates the
+    first column, the readings over all origins, from the regimes.
+    """
+    ax.axhline(reference, color=INK_SECONDARY, linewidth=1, zorder=2)
+    ax.axvline(0.5, color=GRID, linewidth=1, zorder=1)
+    offsets = (np.arange(len(arms)) - (len(arms) - 1) / 2) * (
+        REGIME_GROUP_WIDTH / len(arms)
+    )
+    for position, column in enumerate(columns):
+        for offset, style in zip(offsets, arms):
+            estimate, low, high = values[(*column, style.name)]
+            ax.vlines(position + offset, low, high, color=style.color, linewidth=1)
+            ax.scatter(
+                [position + offset],
+                [estimate],
+                s=MARKER_AREA,
+                facecolor=style.color if style.filled else SURFACE,
+                edgecolor=style.color,
+                linewidth=MARKER_EDGE,
+                zorder=3,
+            )
+    ax.set_xticks(range(len(columns)), labels)
+    ax.set_xlim(-0.6, len(columns) - 0.4)
+
+
+def _cells(
+    table: pd.DataFrame, columns: Sequence[str]
+) -> dict[tuple[str, str, str], tuple[float, float, float]]:
+    keyed = table.set_index(["feature", "regime", "arm"])[list(columns)]
+    return {key: tuple(row) for key, row in zip(keyed.index, keyed.to_numpy())}
+
+
+def plot_regimes(
+    readings: dict[str, pd.DataFrame],
+    bounds: pd.DataFrame,
+    styles: Sequence[ArmStyle],
+    directory: Path,
+) -> list[Path]:
+    """Per origin feature, every reading in each tercile beside all origins.
+
+    One figure per feature, one panel per score and skill, drawn as in
+    ``plot_scores`` and ``plot_skill``: a score where lower is better as each
+    arm's median paired difference from the reference arm, a score with a
+    target as each arm's mean over trials against the target, and a skill as
+    each arm's median skill. Each panel's first column holds the readings over
+    all origins, the next three the feature's terciles, low to high.
+    """
+    contenders = [style for style in styles if style.name != REFERENCE_ARM]
+    differences = readings["comparisons"][
+        readings["comparisons"]["reference"] == REFERENCE_ARM
+    ]
+    panels = []
+    for column in COMPARED_SCORES:
+        title, unit, target = SCORE_LABELS[column]
+        if target is None:
+            panels.append(
+                (
+                    title,
+                    f"{unit}, minus {REFERENCE_ARM}; lower is better",
+                    contenders,
+                    _cells(
+                        differences[differences["metric"] == column],
+                        ["median_difference", "ci_low", "ci_high"],
+                    ),
+                    0.0,
+                )
+            )
+        else:
+            levels = readings["summary"]
+            panels.append(
+                (
+                    title,
+                    f"{unit}, mean over trials; target {target:g}",
+                    styles,
+                    _cells(
+                        levels[levels["metric"] == column],
+                        ["mean", "ci_low", "ci_high"],
+                    ),
+                    target,
+                )
+            )
+    for score in SKILL_SCORES:
+        skills = readings["skill"]
+        panels.append(
+            (
+                SKILL_LABELS[score],
+                f"% better than {REFERENCE_ARM}, median over trials",
+                contenders,
+                _cells(
+                    skills[skills["score"] == score],
+                    ["median_skill", "ci_low", "ci_high"],
+                ),
+                0.0,
+            )
+        )
+    files = []
+    for feature in FEATURES:
+        rows = bounds[bounds["feature"] == feature].set_index("regime")
+        columns = [(OVERALL, OVERALL), *((feature, name) for name in REGIMES)]
+        labels = ["all origins"] + [
+            f"{name}\n{rows.loc[name, 'low']:.2f} to {rows.loc[name, 'high']:.2f}"
+            for name in REGIMES
+        ]
+        figure, axes = _figure(14, 15, rows=4, cols=3)
+        for ax, (title, unit, arms, values, reference) in zip(axes.flat, panels):
+            _regime_panel(ax, columns, labels, arms, values, reference=reference)
+            ax.yaxis.set_major_locator(MaxNLocator(nbins=INTERVAL_TICKS))
+            _title(ax, title, unit)
+        for ax in list(axes.flat)[len(panels) :]:
+            ax.set_visible(False)
+        figure.suptitle(
+            f"Readings per tercile of the {FEATURE_LABELS[feature]}: point and 95 % "
+            f"bootstrap interval over trials",
+            color=INK,
+            fontsize=10,
+        )
+        _arm_legend(figure, styles)
+        files += _save(figure, directory, f"regimes_{feature}")
+    return files
+
+
 def _check_scores_recorded(identity: dict) -> None:
     recorded = [m["columns"] for m in identity["measurements"]]
     if list(ScenarioScores.columns) not in recorded:
@@ -594,25 +773,32 @@ def _check_scores_recorded(identity: dict) -> None:
 
 
 def write_report(
-    results_path: Path, output_dir: Path, exclude_arms: Sequence[str] = ()
+    results_path: Path,
+    prices_path: Path,
+    output_dir: Path,
+    exclude_arms: Sequence[str] = (),
 ) -> ReportOutputs:
     """Compute the statistics of a results file and write its tables and plots.
 
-    ``exclude_arms`` leaves arms out of the report, for example an arm whose
-    session is still running: a trial counts as complete when every reported
-    arm has every origin, so an unfinished arm would otherwise hold back all
-    trials it has not reached.
+    ``prices_path`` is the price file the results were measured on; the
+    regime readings recompute each origin's features from it. ``exclude_arms``
+    leaves arms out of the report, for example an arm whose session is still
+    running: a trial counts as complete when every reported arm has every
+    origin, so an unfinished arm would otherwise hold back all trials it has
+    not reached.
 
     Raises
     ------
     ValueError
-        If the file holds no scenario scores, an excluded arm is not in the
-        file, the reference arm is missing or excluded, or fewer trials are
-        complete than the report needs.
+        If the file holds no scenario scores, the price file is not the one the
+        results were measured on, an excluded arm is not in the file, the
+        reference arm is missing or excluded, fewer trials are complete than
+        the report needs, or a regime holds too few trials or has tied bounds.
     """
     frame, metadata = read_results(results_path)
     identity = metadata.identity
     _check_scores_recorded(identity)
+    check_prices(prices_path, identity)
     unknown = sorted(set(exclude_arms) - set(identity["arms"]))
     if unknown:
         raise ValueError(
@@ -628,6 +814,9 @@ def write_report(
     ranks = ranking(per_trial)
     means, speedups = timing(per_trial)
     levels = reliability(per_trial)
+    features = origin_features(load_prices(prices_path), frame, identity["experiment"])
+    regimes, bounds = terciles(features)
+    readings = regime_readings(frame, regimes)
     tables = {
         "summary": summary(per_trial),
         "comparisons": comparisons(per_trial),
@@ -636,6 +825,9 @@ def write_report(
         "timing": means.reset_index(),
         "speedup": speedups,
         "reliability": levels.rename_axis("arm").reset_index(),
+        "origin_features": features.join(regimes, rsuffix="_regime").reset_index(),
+        "regimes": bounds,
+        **{f"regime_{name}": table for name, table in readings.items()},
     }
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -650,6 +842,7 @@ def write_report(
     files += plot_pit(per_trial, styles, output_dir)
     files += plot_reliability(levels, styles, output_dir)
     files += plot_timing(frame, means, speedups, styles, output_dir)
+    files += plot_regimes(readings, bounds, styles, output_dir)
     return ReportOutputs(files=files, excluded_trials=excluded)
 
 
@@ -679,7 +872,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = load_config(args.config)
     output_dir = config.report_dir
-    outputs = write_report(config.output, output_dir, exclude_arms=args.exclude)
+    outputs = write_report(
+        config.output, config.prices, output_dir, exclude_arms=args.exclude
+    )
     if args.exclude:
         print(f"Left out arms: {args.exclude}")
     if outputs.excluded_trials:
@@ -688,7 +883,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{outputs.excluded_trials}"
         )
     with pd.option_context("display.width", 160, "display.precision", 3):
-        for name in ("ranking", "skill", "speedup"):
+        for name in ("ranking", "skill", "speedup", "regimes"):
             print(f"\n{name}:\n{pd.read_csv(output_dir / f'{name}.csv').to_string()}")
     print(
         f"\nSimulator comparison report finished: {len(outputs.files)} files in "

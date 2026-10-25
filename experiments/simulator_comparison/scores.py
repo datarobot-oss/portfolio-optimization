@@ -118,7 +118,15 @@ def _off_diagonal(matrix: np.ndarray) -> np.ndarray:
     return matrix[np.triu_indices(matrix.shape[0], 1)]
 
 
-def _correlations(returns: np.ndarray, label: str) -> np.ndarray:
+def pairwise_correlations(returns: np.ndarray, label: str) -> np.ndarray:
+    """Correlation of every pair of columns of ``returns`` (rows x columns).
+
+    Raises
+    ------
+    ValueError
+        If a correlation is undefined because a column is constant; ``label``
+        names the returns in the message.
+    """
     correlations = _off_diagonal(np.corrcoef(returns.T))
     if not np.isfinite(correlations).all():
         raise ValueError(
@@ -226,12 +234,12 @@ class ScenarioScores:
         for index, count in enumerate(counts):
             scores[_pit_column(index)] = float(count / samples.shape[1])
 
-        scenario = _correlations(samples, "scenario")
-        trailing = _correlations(window, "look-back window")
+        scenario = pairwise_correlations(samples, "scenario")
+        trailing = pairwise_correlations(window, "look-back window")
         scores["corr_error_trailing"] = float(np.median(np.abs(scenario - trailing)))
         scores["corr_bias_trailing"] = float(np.median(scenario - trailing))
         scores["corr_error_forward"] = float(
-            np.median(np.abs(scenario - _correlations(forward, "forward")))
+            np.median(np.abs(scenario - pairwise_correlations(forward, "forward")))
         )
 
         weights = np.full(samples.shape[1], 1.0 / samples.shape[1])

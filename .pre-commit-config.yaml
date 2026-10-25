@@ -65,3 +65,11 @@ repos:
         language: system
         pass_filenames: false
         files: ^(VERSION|pyproject\.toml|src/__init__\.py|\.claude-plugin/marketplace\.json|\.cursor-plugin/plugin\.json|gemini-extension\.json|skills/.*/SKILL\.md)$
+      # Same command as the CI test job; GPU-marked tests skip without cuOpt/cuML.
+      # The Checks workflow skips this hook because the test jobs already run it.
+      - id: pytest
+        name: Run test suite
+        entry: uv run --group dev --extra experiments pytest tests/ -q
+        language: system
+        pass_filenames: false
+        files: ^((src|tests|experiments|skills|data)/.*|pyproject\.toml|uv\.lock)$

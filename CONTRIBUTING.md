@@ -84,7 +84,7 @@ There are many ways to contribute to the portfolio optimization developer exampl
    uv run pre-commit install
    ```
 
-   This installs the hooks so they run automatically before every `git commit`. To run them manually against all files at any time:
+   This installs the hooks so they run automatically before every `git commit`. `task setup` does this too, together with the full environment and the Jupyter kernel. To run them manually against all files at any time:
 
    ```bash
    uv run pre-commit run --all-files
@@ -96,7 +96,7 @@ There are many ways to contribute to the portfolio optimization developer exampl
    uv run pre-commit run
    ```
 
-   The hooks cover formatting (`ruff format`), linting (`ruff check`), shell script checks (`shellcheck`), YAML validation (`yamllint`), GitHub Actions security scanning (`zizmor`), and skill manifest validation. The same suite runs in CI via the `Checks` workflow on every PR.
+   The hooks cover formatting (`ruff format`), linting (`ruff check`), shell script checks (`shellcheck`), YAML validation (`yamllint`), GitHub Actions security scanning (`zizmor`), skill manifest validation, and the pytest suite (only when source, tests, experiments, skills, data, or dependencies change). The same hooks run in CI via the `Checks` workflow on every PR, except pytest, which the test jobs run instead.
 
 ### Docker Development (Recommended)
 

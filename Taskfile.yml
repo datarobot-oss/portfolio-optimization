@@ -44,10 +44,15 @@ tasks:
     desc: >-
       Reconcile uv.lock with pyproject.toml without upgrading pinned versions,
       then install the locked environment with every extra and group the tasks,
-      tests, and notebooks use (CUDA_EXTRA selects the CUDA extra)
+      tests, and notebooks use (CUDA_EXTRA selects the CUDA extra), the git
+      pre-commit hooks, and the Jupyter kernel
     cmds:
       - uv lock
       - '{{.UV_SYNC_ALL}}'
+      - uv run pre-commit install --install-hooks
+      - >-
+        uv run python -m ipykernel install --user --name=portfolio-opt
+        --display-name "Portfolio Optimization"
       - '{{.LOCK_STATUS}}'
       - echo "setup succeeded with --extra {{.CUDA_EXTRA}}"
 

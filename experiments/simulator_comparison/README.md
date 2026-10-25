@@ -54,7 +54,7 @@ Results go to the config's `output`; the shipped configs write to the git-ignore
 task experiments:report CONFIG=experiments/simulator_comparison/configs/full.yaml
 ```
 
-It reads only the config's results file, so it can be rerun at any time, also while a run is still adding trials. It uses only trials in which every arm has every origin, and prints how many it left out. While a session for one arm is still running, such as the CPU JointFM session, leave that arm out with `EXCLUDE=jointfm-cpu` (`--exclude` for the script) to report the finished arms over all their trials; rerun without it when the session ends. It writes its tables and plots to `<output stem>_report/` beside the results file.
+It reads the config's results file and its price file, so it can be rerun at any time, also while a run is still adding trials. The price file must be the one the results were measured on: the report compares its SHA-256 with the one the results file recorded and refuses another. It uses only trials in which every arm has every origin, and prints how many it left out. While a session for one arm is still running, such as the CPU JointFM session, leave that arm out with `EXCLUDE=jointfm-cpu` (`--exclude` for the script) to report the finished arms over all their trials; rerun without it when the session ends. It writes its tables and plots to `<output stem>_report/` beside the results file.
 
 - **Ranking** (`ranking.png`, `ranking.csv`): which arm gives the most realistic scenarios. Per trial, arms are ranked by energy score (lower is better). The report gives each arm's share of trials won and its mean rank.
 - **Skill** (`skill.png`, `skill.csv`): per trial, the percent reduction of energy score and CRPS against `no_fit-cpu`, with the median and its 95 % bootstrap interval over trials.
@@ -62,6 +62,12 @@ It reads only the config's results file, so it can be rerun at any time, also wh
 - **Comparisons** (`comparisons.csv`): every arm against `no_fit-cpu`, and each simulator's GPU arm against its CPU arm, with the median paired difference, its bootstrap interval, and a Wilcoxon signed-rank p-value.
 - **Calibration** (`calibration_pit.png`, `calibration_reliability.png`, `reliability.csv`): mean PIT histograms, and the empirical against nominal coverage of central intervals.
 - **Timing** (`timing.png`, `timing.csv`, `speedup.csv`): seconds per generation call without warm-up, and each simulator's CPU-to-GPU time ratio.
+- **Regimes** (`regimes_<feature>.png`, `regimes.csv`, `origin_features.csv`, `regime_summary.csv`, `regime_comparisons.csv`, `regime_skill.csv`, `regime_ranking.csv`): every score, skill, and ranking above, repeated per tercile of three features of the forecast origin, because an average over all origins can hide that an arm gains in one market regime and fails in another. [`regimes.py`](regimes.py) recomputes the features from the returns each origin's arms and scores saw:
+  - `window_correlation`: the look-back window's mean pairwise correlation.
+  - `volatility_ratio`: each asset's volatility over the window's last 63 returns divided by its volatility over the whole window, median over assets. It is above 1 when volatility rose into the origin.
+  - `correlation_change`: the forward returns' mean pairwise correlation minus the window's. It looks ahead, so it explains readings and never selects a forecast.
+
+  Each table holds the overall readings first, with `feature` and `regime` set to `all` and the same values as the overall tables, then one block per feature and tercile (`low`, `middle`, `high`). Within a tercile, each trial is aggregated over its origins in that tercile, and the intervals resample trials. `regimes.csv` gives each tercile's feature bounds and its numbers of origins and trials, and `origin_features.csv` gives each origin's features and terciles. Each figure shows one feature: the first column of every panel holds all origins, the next three the terciles, drawn as in `scores.png` and `skill.png`.
 
 Colors follow the simulator. Filled marks are CPU arms and hollow marks GPU arms, and every axis label names its arm.
 

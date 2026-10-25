@@ -42,4 +42,7 @@ jobs:
         run: pip install pre-commit
 
       - name: Run pre-commit
+        # The test jobs in pr.yaml and main.yml run the pytest suite with its extras.
+        env:
+          SKIP: pytest
         run: pre-commit run --all-files --show-diff-on-failure
