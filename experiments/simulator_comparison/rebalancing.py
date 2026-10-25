@@ -10,7 +10,8 @@ days the configured ``trigger`` decides whether the portfolio is re-optimized,
 always (``every_step``) or after losses beyond ``pct_change_threshold``
 (``pct_change``). Every arm of a trial gets
 the same window, CVaR constraints, risk aversion, and scenario seed, so arms
-differ only in the scenarios their simulator generates.
+differ only in the ``CvarData`` their simulator generates: its scenarios and
+its expected returns.
 
 The risk aversion is the configured base scaled once per trial by the best
 single-asset return/CVaR ratio of the history before the window, as the
@@ -23,6 +24,10 @@ day, and the Sharpe and Sortino ratios subtract the same daily rates.
 Portfolio values follow the library's backtester, which values ``LOG`` returns
 as ``exp(cumsum(R_log @ w))``: a value that cannot reach zero, which
 understates the losses of short positions. That bias is accepted for now.
+
+Every optimization also records the chosen portfolio's one-day scenario risk
+(``chosen.DecisionRecorder``), and the run reads it against the realized
+returns of the days that portfolio is held (``chosen.chosen_readings``).
 """
 
 import argparse
@@ -30,7 +35,7 @@ import copy
 import hashlib
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -43,13 +48,20 @@ from portfolio_optimization.gpu import apply_gpu_selection
 from portfolio_optimization.settings import ApiSettings, ScenarioGenerationSettings
 
 from .arms import (
-    Arm,
+    AnyArm,
+    HistoricalMeanArm,
+    IndependentArm,
+    SwapArm,
     check_same_checkpoint,
+    historical_mean_settings,
+    jointfm_calls,
     resolve_arms,
     scenario_settings,
     verify_jointfm_service,
 )
+from .chosen import CHOSEN_METRICS, DecisionRecorder, chosen_readings
 from .config import ExperimentConfig, RebalancingConfig, load_config
+from .independence import IndependentScenarioGenerator
 from .runner import (
     PROGRESS_INTERVAL_LOG,
     PROGRESS_INTERVAL_TERMINAL,
@@ -58,6 +70,7 @@ from .runner import (
     package_versions,
     run_identity,
 )
+from .swaps import SwapScenarioGenerator
 from .table import RunMetadata, merge_identity, read_results, write_results
 from .trials import (
     RETURNS_SETTINGS,
@@ -70,7 +83,8 @@ from .trials import (
 
 KEY_COLUMNS = ("trial", "arm")
 TRADING_DAYS_PER_YEAR = risk_free.TRADING_DAYS_PER_YEAR
-# Per-run readings; step_returns holds the per-step values behind the first two.
+# Per-run readings; step_returns holds the per-step values behind the first two,
+# the chosen_* lists of chosen.DECISION_COLUMNS the decisions behind CHOSEN_METRICS.
 METRICS = (
     "mean_step_return",
     "step_return_std",
@@ -84,6 +98,7 @@ METRICS = (
     "turnover",
     "rebalances",
     "buy_and_hold_return",
+    *CHOSEN_METRICS,
 )
 
 
@@ -202,8 +217,43 @@ def backtest_readings(
     }
 
 
+def backtest_scenarios(
+    arm: AnyArm, *, num_scen: int, seed: int
+) -> tuple[ScenarioGenerationSettings, Callable[..., dict]]:
+    """Settings and scenario generator that make ``rebalance_portfolio`` run ``arm``.
+
+    A simulator runs through the library's ``generate_cvar_data``. A swap cell
+    runs on its marginal donor's settings, so it draws the marginal donor's
+    scenarios and keeps its expected returns, while ``SwapScenarioGenerator``
+    reorders them into the dependence donor's ranks; both donors share the
+    seed their own arms run with, so they draw exactly those arms' scenarios.
+    The historical-mean arm runs its JointFM donor's settings with
+    ``expected_return="historical"`` under the same seed, so it optimizes on
+    the donor's scenarios with the window's mean. The independence control
+    runs the window's settings, and ``IndependentScenarioGenerator`` permutes
+    each asset's rows.
+    """
+    if isinstance(arm, HistoricalMeanArm):
+        return historical_mean_settings(
+            arm, num_scen=num_scen, seed=seed
+        ), cvar_utils.generate_cvar_data
+    if isinstance(arm, IndependentArm):
+        return scenario_settings(
+            arm.window, num_scen=num_scen, seed=seed
+        ), IndependentScenarioGenerator()
+    if isinstance(arm, SwapArm):
+        return scenario_settings(
+            arm.marginals, num_scen=num_scen, seed=seed
+        ), SwapScenarioGenerator(
+            scenario_settings(arm.dependence, num_scen=num_scen, seed=seed), num_scen
+        )
+    return scenario_settings(
+        arm, num_scen=num_scen, seed=seed
+    ), cvar_utils.generate_cvar_data
+
+
 def run_backtest(
-    arm: Arm,
+    arm: AnyArm,
     trial: Trial,
     window: TradingWindow,
     universe_path: Path,
@@ -216,15 +266,18 @@ def run_backtest(
 
     rebalancing = config.rebalancing
     dates = load_prices(universe_path).index
+    settings, generator = backtest_scenarios(
+        arm,
+        num_scen=config.num_scen,
+        seed=rebalancing_seed(config.seed, trial.index),
+    )
+    recorder = DecisionRecorder(params.confidence)
     start = time.perf_counter()
     rebalancer = rebalance.rebalance_portfolio(
         dataset_directory=str(universe_path),
         returns_compute_settings=RETURNS_SETTINGS,
-        scenario_generation_settings=scenario_settings(
-            arm,
-            num_scen=config.num_scen,
-            seed=rebalancing_seed(config.seed, trial.index),
-        ),
+        scenario_generation_settings=settings,
+        scenario_generator=generator,
         trading_start=dates[window.start].strftime("%Y-%m-%d"),
         trading_end=dates[window.end].strftime("%Y-%m-%d"),
         look_forward_window=rebalancing.look_forward_window,
@@ -238,8 +291,9 @@ def run_backtest(
         },
         api_settings=ApiSettings(scale_risk_aversion=False),
         risk_free_rate=risk_free_rates,
+        decision_observer=recorder,
     )
-    results, _, value = rebalancer.re_optimize(
+    results, re_optimize_dates, value = rebalancer.re_optimize(
         transaction_cost_factor=rebalancing.transaction_cost
     )
     seconds = time.perf_counter() - start
@@ -250,6 +304,16 @@ def run_backtest(
         rebalancing.trading_days // rebalancing.look_forward_window,
         risk_free_rates,
     )
+    decided = [decision.date for decision in recorder.decisions]
+    if decided != [dates[window.start], *re_optimize_dates]:
+        raise ValueError(
+            f"The run recorded decisions on {decided}, but optimized on the "
+            f"window's first day and on {re_optimize_dates}."
+        )
+    realized = utils.calculate_returns(
+        load_prices(universe_path).iloc[window.start : window.end + 1],
+        returns_compute_settings=RETURNS_SETTINGS,
+    )["returns"]
     return {
         "trial": trial.index,
         "arm": arm.name,
@@ -261,12 +325,13 @@ def run_backtest(
         "risk_aversion": float(params.risk_aversion),
         "seconds": seconds,
         **readings,
+        **chosen_readings(recorder.decisions, realized),
     }
 
 
 def rebalancing_identity(
     config: ExperimentConfig,
-    arms: Sequence[Arm],
+    arms: Sequence[AnyArm],
     prices: pd.DataFrame,
     services: dict[str, dict],
 ) -> dict:
@@ -348,7 +413,7 @@ def run_rebalancing_experiment(
                 seed=config.seed,
                 n_assets=config.assets,
                 n_origins=config.origins,
-                look_back=config.look_back,
+                origin_history=config.origin_history,
                 forward=config.forward,
             )
             window = draw_trading_window(
@@ -363,11 +428,11 @@ def run_rebalancing_experiment(
                 prices[list(trial.assets)], window, rebalancing
             )
             trials = {index: (trial, window, universe_path, params)}
-        if arm.fit_type == "jointfm":
-            verify_jointfm_service(arm, services[arm.name])
+        for called in jointfm_calls(arm):
+            verify_jointfm_service(called, services[called.name])
         row = run_backtest(arm, *trials[index], config, rates)
-        if arm.fit_type == "jointfm":
-            verify_jointfm_service(arm, services[arm.name])
+        for called in jointfm_calls(arm):
+            verify_jointfm_service(called, services[called.name])
         new = pd.DataFrame([row])
         frame = new if frame is None else pd.concat([frame, new], ignore_index=True)
         write_results(rebalancing.output, frame, metadata)

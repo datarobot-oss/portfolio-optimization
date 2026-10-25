@@ -111,6 +111,20 @@ tasks:
         experiments.simulator_comparison.rebalancing_report --config {{.CONFIG}}
       - echo "experiments:rebalance-report succeeded for {{.CONFIG}}"
 
+  experiments:history:
+    desc: >-
+      Paired change of every score from the results of BASELINE (default
+      full.yaml) to those of CONFIG (default full_long_history.yaml), two
+      configs that differ only in look_back, without running anything
+    vars:
+      BASELINE: '{{.BASELINE | default (print .CONFIG_DIR "/full.yaml")}}'
+      CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/full_long_history.yaml")}}'
+    cmds:
+      - >-
+        uv run --extra experiments python -m experiments.simulator_comparison.history
+        --baseline {{.BASELINE}} --config {{.CONFIG}}
+      - echo "experiments:history succeeded for {{.BASELINE}} against {{.CONFIG}}"
+
   experiments:all:
     desc: >-
       Run the scenario comparison of CONFIG (default full.yaml), its report,
@@ -204,5 +218,8 @@ tasks:
         uv run --group dev --extra experiments pytest
         tests/test_simulator_comparison.py tests/test_simulator_config.py
         tests/test_simulator_scores.py tests/test_simulator_report.py
-        tests/test_simulator_rebalancing.py tests/test_simulator_clean.py -q
+        tests/test_simulator_rebalancing.py tests/test_simulator_clean.py
+        tests/test_simulator_portfolios.py tests/test_simulator_horizons.py
+        tests/test_simulator_swaps.py tests/test_simulator_chosen.py
+        tests/test_simulator_attribution.py tests/test_simulator_history.py -q
       - echo "experiments:test succeeded"

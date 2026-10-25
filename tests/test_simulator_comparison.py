@@ -10,7 +10,7 @@ import pytest
 
 from experiments.simulator_comparison.config import ExperimentConfig
 from experiments.simulator_comparison.runner import run_experiment
-from experiments.simulator_comparison.scores import ScenarioScores
+from experiments.simulator_comparison.scores import PortfolioScores, ScenarioScores
 from experiments.simulator_comparison.table import read_results
 from experiments.simulator_comparison.trials import draw_trial, origin_inputs
 
@@ -49,10 +49,13 @@ def _config(tmp_path, prices_path, **overrides):
         origins=N_ORIGINS,
         assets=4,
         look_back=LOOK_BACK,
+        origin_history=LOOK_BACK,
         forward=FORWARD,
         num_scen=16,
         seed=5,
         arms=CONFIG_ARMS,
+        portfolio_sizes=(1, 2, 4),
+        horizons=(1,),
         rebalancing=dict(
             output=tmp_path / "rebalancing.parquet",
             arms=("no_fit-cpu",),
@@ -90,9 +93,9 @@ class RecordingMeasurement:
     def __init__(self):
         self.calls = []
 
-    def __call__(self, inputs, cvar_data):
-        self.calls.append((inputs, cvar_data))
-        return {"scenario_rows": float(cvar_data.R.shape[0])}
+    def __call__(self, inputs, horizon, samples, expected_returns):
+        self.calls.append((inputs, horizon, samples))
+        return {"scenario_rows": float(samples.shape[1])}
 
 
 class TestTrials:
@@ -101,7 +104,7 @@ class TestTrials:
             seed=5,
             n_assets=4,
             n_origins=N_ORIGINS,
-            look_back=LOOK_BACK,
+            origin_history=LOOK_BACK,
             forward=FORWARD,
         )
         trial = draw_trial(prices, 1, **kwargs)
@@ -120,7 +123,7 @@ class TestTrials:
             seed=5,
             n_assets=4,
             n_origins=1,
-            look_back=LOOK_BACK,
+            origin_history=LOOK_BACK,
             forward=FORWARD,
         )
         (origin,) = trial.origins
@@ -130,7 +133,14 @@ class TestTrials:
         log_prices = np.log(prices[list(trial.assets)])
         expected = log_prices.diff().iloc[origin + 1 : origin + 1 + FORWARD]
         pd.testing.assert_frame_equal(inputs.forward, expected)
-        pd.testing.assert_series_equal(inputs.realized, expected.iloc[0])
+        pd.testing.assert_series_equal(
+            inputs.realized(1), expected.iloc[0], check_names=False
+        )
+        pd.testing.assert_series_equal(
+            inputs.realized(FORWARD), expected.sum(), check_names=False
+        )
+        with pytest.raises(ValueError, match="needs 9 forward returns"):
+            inputs.realized(FORWARD + 1)
         assert inputs.returns_dict["returns"].index[-1] == prices.index[origin]
 
     def test_too_many_assets_are_refused(self, prices):
@@ -141,7 +151,7 @@ class TestTrials:
                 seed=5,
                 n_assets=9,
                 n_origins=1,
-                look_back=LOOK_BACK,
+                origin_history=LOOK_BACK,
                 forward=FORWARD,
             )
 
@@ -159,18 +169,21 @@ class TestRunner:
         assert (frame.groupby("trial")["assets_hash"].nunique() == 1).all()
         assert (frame["scenario_rows"] == 4).all()
 
-        for inputs, cvar_data in measurement.calls:
+        for inputs, horizon, samples in measurement.calls:
             # No arm sees the cvar_data another arm added to its copy.
             assert "cvar_data" not in inputs.returns_dict
+            assert horizon == 1
         no_fit_calls = measurement.calls[:: len(CPU_ARMS)]
         jointfm_rows = frame[frame["arm"] == "jointfm-cpu"]
         assert [call["seed"] for call in fake_jointfm.forecast_calls] == list(
             jointfm_rows["seed"]
         )
-        for (inputs, cvar_data), call in zip(no_fit_calls, fake_jointfm.forecast_calls):
+        for (inputs, _, samples), call in zip(
+            no_fit_calls, fake_jointfm.forecast_calls
+        ):
             window = inputs.returns_dict["returns"]
             # no_fit returns the window itself, and JointFM got its log-price path.
-            np.testing.assert_array_equal(cvar_data.R, window.to_numpy().T)
+            np.testing.assert_array_equal(samples, window.to_numpy())
             np.testing.assert_allclose(
                 call["history"].to_numpy()[1:], np.cumsum(window.to_numpy(), axis=0)
             )
@@ -281,7 +294,7 @@ class TestRunner:
         self, tmp_path, prices_path, fake_jointfm
     ):
         class Wrong(RecordingMeasurement):
-            def __call__(self, inputs, cvar_data):
+            def __call__(self, inputs, horizon, samples, expected_returns):
                 return {"other": 1.0}
 
         with pytest.raises(ValueError, match="declared"):
@@ -289,15 +302,87 @@ class TestRunner:
 
     def test_scores_fill_every_row(self, tmp_path, prices_path, fake_jointfm):
         config = _config(tmp_path, prices_path, trials=1)
-        frame = run_experiment(config, [ScenarioScores()])
-        scores = frame[list(ScenarioScores.columns)]
+        portfolios = PortfolioScores(
+            config.portfolio_sizes, config.rebalancing.cvar, config.assets
+        )
+        frame = run_experiment(config, [ScenarioScores(), portfolios])
+        scores = frame[[*ScenarioScores.columns, *portfolios.columns]]
         assert np.isfinite(scores.to_numpy()).all()
         no_fit = frame[frame["arm"] == "no_fit-cpu"]
         assert (no_fit["corr_error_trailing"] == 0.0).all()
         _, metadata = read_results(config.output)
-        (recorded,) = metadata.identity["measurements"]
+        recorded, recorded_portfolios = metadata.identity["measurements"]
         assert recorded["columns"] == list(ScenarioScores.columns)
         assert recorded["parameters"] == ScenarioScores.parameters
+        assert recorded_portfolios["columns"] == list(portfolios.columns)
+        assert recorded_portfolios["parameters"]["cells"] == [
+            ["equal", 1],
+            ["long_only", 1],
+            ["equal", 2],
+            ["long_only", 2],
+            ["equal", 4],
+            ["long_only", 4],
+        ]
+
+    def test_every_horizon_gets_a_row_from_one_call(
+        self, tmp_path, prices_path, fake_jointfm
+    ):
+        """Each arm's call at an origin writes one timed row per horizon."""
+        fake_jointfm.envelope.n_input = 1000
+        config = _config(tmp_path, prices_path, trials=1, horizons=(1, 3, FORWARD))
+        frame = run_experiment(config, [ScenarioScores()])
+
+        assert len(frame) == N_ORIGINS * len(CPU_ARMS) * 3
+        assert not frame.duplicated(["trial", "origin", "arm", "horizon"]).any()
+        calls = frame.groupby(["trial", "origin", "arm"])
+        assert all(
+            horizons == [1, 3, FORWARD] for horizons in calls["horizon"].apply(list)
+        )
+        # One timed call generates every horizon of an arm at an origin.
+        assert (calls["seconds"].nunique() == 1).all()
+        assert (calls["warmup"].nunique() == 1).all()
+        # JointFM answers every horizon in one request.
+        assert len(fake_jointfm.forecast_calls) == N_ORIGINS
+        for call in fake_jointfm.forecast_calls:
+            last = len(call["history"]) - 1
+            assert call["query_times"] == [last + 1, last + 3, last + FORWARD]
+        no_fit = frame[frame["arm"] == "no_fit-cpu"].set_index("horizon")["num_scen"]
+        assert (no_fit.loc[1] == LOOK_BACK).all()
+        assert (no_fit.loc[[3, FORWARD]] == 16).all()
+        _, metadata = read_results(config.output)
+        assert metadata.identity["experiment"]["horizons"] == [1, 3, FORWARD]
+
+    def test_next_day_rows_do_not_depend_on_other_horizons(
+        self, tmp_path, prices_path, fake_jointfm
+    ):
+        """Adding horizons leaves the simulators' next-day readings unchanged."""
+        fake_jointfm.envelope.n_input = 1000
+        config = _config(tmp_path, prices_path, trials=1)
+        portfolios = PortfolioScores(
+            config.portfolio_sizes, config.rebalancing.cvar, config.assets
+        )
+        measurements = [ScenarioScores(), portfolios]
+        alone = run_experiment(config, measurements)
+        several = run_experiment(
+            _config(
+                tmp_path,
+                prices_path,
+                trials=1,
+                horizons=(1, 3, FORWARD),
+                output=tmp_path / "several.parquet",
+            ),
+            measurements,
+        )
+        scores = [*ScenarioScores.columns, *portfolios.columns]
+        next_day = several[several["horizon"] == 1].reset_index(drop=True)
+        assert np.isfinite(several[scores].to_numpy()).all()
+        # The fake service draws all horizons at once, so only the simulators
+        # the comparison runs itself reproduce their next day exactly.
+        exact = alone["fit_type"] != "jointfm"
+        pd.testing.assert_frame_equal(
+            next_day.loc[exact, ["arm", "origin", "num_scen", *scores]],
+            alone.loc[exact, ["arm", "origin", "num_scen", *scores]],
+        )
 
 
 class TestJointFMService:
@@ -316,8 +401,8 @@ class TestJointFMService:
         class SwitchService(RecordingMeasurement):
             """Points .env at a GPU service once the first origin's arms ran."""
 
-            def __call__(self, inputs, cvar_data):
-                values = super().__call__(inputs, cvar_data)
+            def __call__(self, inputs, horizon, samples, expected_returns):
+                values = super().__call__(inputs, horizon, samples, expected_returns)
                 if len(self.calls) == len(CPU_ARMS):
                     fake_jointfm.device = "cuda:0"
                 return values

@@ -69,10 +69,20 @@ class OriginInputs:
     forward: pd.DataFrame
     seed: int
 
-    @property
-    def realized(self) -> pd.Series:
-        """Log return of every asset over the next row, the forecast outcome."""
-        return self.forward.iloc[0]
+    def realized(self, horizon: int) -> pd.Series:
+        """Log return of every asset over the next ``horizon`` rows, the outcome.
+
+        Raises
+        ------
+        ValueError
+            If ``forward`` holds fewer than ``horizon`` rows.
+        """
+        if not 1 <= horizon <= len(self.forward):
+            raise ValueError(
+                f"A {horizon}-day outcome needs {horizon} forward returns; the "
+                f"origin keeps {len(self.forward)}."
+            )
+        return self.forward.iloc[:horizon].sum()
 
 
 def draw_trial(
@@ -82,10 +92,13 @@ def draw_trial(
     seed: int,
     n_assets: int,
     n_origins: int,
-    look_back: int,
+    origin_history: int,
     forward: int,
 ) -> Trial:
     """Draw a trial's assets and forecast origins without replacement.
+
+    The look-back window is not a parameter, so runs that differ only in it
+    draw the same trial.
 
     Parameters
     ----------
@@ -99,9 +112,9 @@ def draw_trial(
         Number of assets in the trial's universe.
     n_origins : int
         Number of forecast origins.
-    look_back : int
-        Returns per look-back window; an origin needs ``look_back`` earlier
-        price rows.
+    origin_history : int
+        Returns an origin needs before it; an origin needs ``origin_history``
+        earlier price rows.
     forward : int
         Returns after the origin kept for scoring; an origin needs ``forward``
         later price rows.
@@ -116,7 +129,7 @@ def draw_trial(
         If the table has fewer assets than ``n_assets`` or fewer eligible
         origins than ``n_origins``.
     """
-    eligible = np.arange(look_back, len(prices) - forward)
+    eligible = np.arange(origin_history, len(prices) - forward)
     if n_assets > prices.shape[1]:
         raise ValueError(
             f"A trial draws {n_assets} assets, but the price table has "
@@ -125,7 +138,7 @@ def draw_trial(
     if n_origins > len(eligible):
         raise ValueError(
             f"A trial draws {n_origins} origins, but only {len(eligible)} rows "
-            f"have {look_back} earlier and {forward} later rows."
+            f"have {origin_history} earlier and {forward} later rows."
         )
     rng = np.random.default_rng([seed, index])
     asset_positions = np.sort(rng.choice(prices.shape[1], n_assets, replace=False))

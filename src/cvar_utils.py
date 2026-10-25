@@ -4,6 +4,7 @@
 
 import os
 import time
+from collections.abc import Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -162,20 +163,9 @@ def generate_samples_jointfm(
     """Sample joint next-period return scenarios from a JointFM model.
 
     Each scenario is one joint draw of the row that follows ``returns_data``,
-    so it stands for the same quantity as a 'gaussian' or 'kde' scenario.
-    The simulator sends each asset's log-price path, the cumulative sum of
-    its log returns ('LINEAR' returns through ``log1p``) starting from 0 at
-    the price before ``returns_data``, and forecasts the next log price. The
-    path's starting constant is arbitrary because the served model reads
-    each column relative to its last value. Each draw minus the path's last
-    log price is the next log return, which is converted into
-    ``return_type``. Any finite log return maps to a positive price, so no
-    scenario implies a negative price.
-
-    All assets go into one request because a scenario is a draw from their
-    joint distribution; the ``jointfm-client`` SDK splits a large ``num_scen``
-    across requests and pooled instances along the sample axis, never across
-    assets.
+    so it stands for the same quantity as a 'gaussian' or 'kde' scenario. It
+    is the one-period case of ``generate_horizon_samples_jointfm``, which
+    describes the request.
 
     Parameters
     ----------
@@ -183,15 +173,12 @@ def generate_samples_jointfm(
         Number of scenarios to generate.
     returns_data : pd.DataFrame
         Historical one-period returns (dates x assets), oldest row first.
-        Only the most recent ``n_input`` points of the log-price path are
-        sent when it is longer than the history the served model accepts.
     return_type : str
         'LOG' or 'LINEAR', as in ReturnsComputeSettings.return_type.
     freq : int
         Return period in rows, as in ReturnsComputeSettings.freq; must be 1.
     jointfm_settings : JointFMSettings
-        Where the client reads its environment (endpoint, credentials, and
-        the choice between a local instance, one deployment, or a pool).
+        Where the client reads its environment.
     seed : int, optional
         Seed forwarded to the service's sampler. None (default) draws fresh
         entropy, so repeated calls return different samples.
@@ -204,14 +191,82 @@ def generate_samples_jointfm(
 
     Raises
     ------
+    ImportError, ValueError
+        As ``generate_horizon_samples_jointfm``.
+    """
+    return generate_horizon_samples_jointfm(
+        num_scen, returns_data, return_type, freq, jointfm_settings, (1,), seed=seed
+    )[:, 0, :]
+
+
+def generate_horizon_samples_jointfm(
+    num_scen: int,
+    returns_data: pd.DataFrame,
+    return_type: str,
+    freq: int,
+    jointfm_settings: JointFMSettings,
+    horizons: Sequence[int],
+    seed: int = None,
+):
+    """Sample joint return scenarios over several horizons from one JointFM request.
+
+    The simulator sends each asset's log-price path, the cumulative sum of
+    its log returns ('LINEAR' returns through ``log1p``) starting from 0 at
+    the price before ``returns_data``, and forecasts the log price ``h``
+    periods after the last one for every ``h`` in ``horizons``. The path's
+    starting constant is arbitrary because the served model reads each column
+    relative to its last value. Each draw minus the path's last log price is
+    the log return over the next ``h`` periods, which is converted into
+    ``return_type``. Any finite log return maps to a positive price, so no
+    scenario implies a negative price.
+
+    All assets go into one request because a scenario is a draw from their
+    joint distribution; the ``jointfm-client`` SDK splits a large ``num_scen``
+    across requests and pooled instances along the sample axis, never across
+    assets. A deployment draws each horizon independently, so scenario ``s``
+    at one horizon and scenario ``s`` at another are not one path: each
+    horizon's scenarios describe the joint distribution of the assets at that
+    horizon alone.
+
+    Parameters
+    ----------
+    num_scen : int
+        Number of scenarios per horizon.
+    returns_data : pd.DataFrame
+        Historical one-period returns (dates x assets), oldest row first.
+        Only the most recent ``n_input`` points of the log-price path are
+        sent when it is longer than the history the served model accepts.
+    return_type : str
+        'LOG' or 'LINEAR', as in ReturnsComputeSettings.return_type.
+    freq : int
+        Return period in rows, as in ReturnsComputeSettings.freq; must be 1.
+    jointfm_settings : JointFMSettings
+        Where the client reads its environment (endpoint, credentials, and
+        the choice between a local instance, one deployment, or a pool).
+    horizons : sequence of int
+        Periods after the last observation, positive and strictly increasing.
+    seed : int, optional
+        Seed forwarded to the service's sampler. None (default) draws fresh
+        entropy, so repeated calls return different samples.
+
+    Returns
+    -------
+    np.ndarray
+        Returns over each horizon, shape (num_scen, len(horizons), n_assets),
+        columns in the order of ``returns_data``.
+
+    Raises
+    ------
     ImportError
         If the 'jointfm' extra is not installed.
     ValueError
         If ``return_type`` carries no price level ('ABSOLUTE', 'PNL') or
         ``freq`` is not 1, so no log-price path reproduces the returns; if
+        ``horizons`` is empty, not positive, or not strictly increasing; if
         the service reports no capacity envelope; if the asset count lies
-        outside its ``[min_series, max_series]``; or if the response does not
-        hold ``num_scen`` draws of every asset in order.
+        outside its ``[min_series, max_series]`` or a horizon beyond its
+        ``n_output``; or if the response does not hold ``num_scen`` draws of
+        every asset at every horizon in order.
     """
     if return_type not in JOINTFM_RETURN_TYPES:
         raise ValueError(
@@ -224,6 +279,15 @@ def generate_samples_jointfm(
             f"fit_type='jointfm' needs one-period returns (freq=1): overlapping "
             f"returns over freq={freq} rows are moving sums that no one-step "
             f"log-price path reproduces."
+        )
+    horizons = list(horizons)
+    if (
+        not horizons
+        or horizons[0] < 1
+        or any(b <= a for a, b in zip(horizons, horizons[1:]))
+    ):
+        raise ValueError(
+            f"JointFM horizons {horizons} must be positive and strictly increasing."
         )
 
     jointfm_client = _import_jointfm_client()
@@ -246,6 +310,11 @@ def generate_samples_jointfm(
             f"{envelope.max_series} series; got {n_assets} assets. Choose a "
             f"universe within that range."
         )
+    if horizons[-1] > envelope.n_output:
+        raise ValueError(
+            f"The served model forecasts at most n_output={envelope.n_output} "
+            f"periods ahead; got horizon {horizons[-1]}."
+        )
 
     asset_names = [str(column) for column in returns_data.columns]
     log_returns = returns_data if return_type == "LOG" else np.log1p(returns_data)
@@ -256,7 +325,7 @@ def generate_samples_jointfm(
     history = pd.DataFrame(log_prices[-envelope.n_input :], columns=asset_names)
     forecast = client.forecast(
         history,
-        query_times=[len(history)],
+        query_times=[len(history) - 1 + h for h in horizons],
         return_mode="samples",
         n_samples=num_scen,
         seed=seed,
@@ -269,15 +338,50 @@ def generate_samples_jointfm(
             f"JointFM returned columns {list(forecast.requested_columns)}, "
             f"expected {asset_names}."
         )
-    if forecast.samples.shape != (num_scen, 1, n_assets):
+    expected_shape = (num_scen, len(horizons), n_assets)
+    if forecast.samples.shape != expected_shape:
         raise ValueError(
             f"JointFM returned samples of shape {forecast.samples.shape}, "
-            f"expected {(num_scen, 1, n_assets)}."
+            f"expected {expected_shape}."
         )
-    next_log_returns = forecast.samples[:, 0, :] - history.iloc[-1].to_numpy()
+    horizon_log_returns = forecast.samples - history.iloc[-1].to_numpy()
     if return_type == "LOG":
-        return next_log_returns
-    return np.expm1(next_log_returns)
+        return horizon_log_returns
+    return np.expm1(horizon_log_returns)
+
+
+def expected_returns(
+    returns_dict: dict,
+    scenario_generation_settings: ScenarioGenerationSettings,
+    scenarios: np.ndarray,
+) -> np.ndarray:
+    """The expected returns ``generate_cvar_data`` stores in ``CvarData.mean``.
+
+    JointFM with ``expected_return='scenario'`` takes the mean of its own
+    scenarios; every other simulator, and JointFM with
+    ``expected_return='historical'``, takes the look-back window's mean.
+
+    Parameters
+    ----------
+    returns_dict : dict
+        The look-back window's returns as ``calculate_returns`` builds them.
+    scenario_generation_settings : ScenarioGenerationSettings
+        Settings the scenarios were generated with.
+    scenarios : np.ndarray
+        The simulator's next-period scenarios, shape ``(scenarios, assets)``.
+
+    Returns
+    -------
+    np.ndarray
+        Expected return per asset, shape ``(assets,)``.
+    """
+    jointfm_settings = scenario_generation_settings.jointfm_settings
+    if (
+        scenario_generation_settings.fit_type == "jointfm"
+        and jointfm_settings.expected_return == "scenario"
+    ):
+        return scenarios.mean(axis=0)
+    return returns_dict["mean"]
 
 
 def generate_cvar_data(
@@ -360,8 +464,9 @@ def generate_cvar_data(
         )
         R = np.transpose(R_log)
         p = np.ones(num_scen) / num_scen  # probability of each scenario
-        if jointfm_settings.expected_return == "scenario":
-            return_mean = R_log.mean(axis=0)
+        return_mean = expected_returns(
+            returns_dict, scenario_generation_settings, R_log
+        )
 
     else:
         raise ValueError(

@@ -5,8 +5,17 @@
 
 A trial counts when every arm finished its run, and every comparison pairs
 arms within a trial against ``no_fit``, the historical scenarios, with
-bootstrap intervals over trials, as the scenario report does. Colors, fills,
-and labels follow that report.
+bootstrap intervals over trials, as the scenario report does. With the
+dependence swap arms it also splits every reading into what JointFM's
+marginals and its dependence cause (``rebalancing_swap_effects.csv``, from
+``analysis.swap_effects``), and with the historical-mean JointFM arm into
+what JointFM's expected returns and its scenarios cause
+(``rebalancing_mean_attribution.csv``, from ``analysis.mean_attribution``).
+Whether the backtest sees dependence at all reads off the independence
+control's row in ``rebalancing_comparisons.csv``. How the risk of the
+portfolios each arm chose compares with their outcome, against the binomial
+band of a correct VaR, is ``rebalancing_chosen_risk.csv`` (``chosen_risk``).
+Colors, fills, and labels follow that report.
 """
 
 import argparse
@@ -17,17 +26,23 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from matplotlib.ticker import MaxNLocator
+from scipy.stats import binom
 
 from .analysis import (
     BOOTSTRAP_SEED,
+    CONFIDENCE,
     MIN_TRIALS,
     REFERENCE_ARM,
     bootstrap_interval,
     compare,
+    mean_attribution,
+    mean_attribution_design,
+    swap_design,
+    swap_effects,
 )
+from .chosen import CHOSEN_METRICS
 from .config import load_config
-from .rebalancing import METRICS
-from .report import (
+from .plotting import (
     INK,
     INK_SECONDARY,
     LINE_WIDTH,
@@ -42,6 +57,7 @@ from .report import (
     _title,
     arm_styles,
 )
+from .rebalancing import METRICS
 from .table import read_results
 
 PERCENT = 100
@@ -99,6 +115,24 @@ METRIC_LABELS = {
         "percentage points, first portfolio kept",
         "higher",
         PERCENT,
+    ),
+    "chosen_breach_rate": (
+        "Chosen-portfolio VaR breaches",
+        "percentage points of held days",
+        None,
+        PERCENT,
+    ),
+    "chosen_volatility_ratio": (
+        "Chosen-portfolio volatility ratio",
+        "realized over scenario volatility",
+        None,
+        1,
+    ),
+    "chosen_effective_holdings": (
+        "Effective holdings",
+        "assets, (sum |w|)^2 / sum w^2",
+        None,
+        1,
     ),
 }
 # Which side of the zero line a better arm lands on, per better direction.
@@ -167,6 +201,77 @@ def summary(per_trial: pd.DataFrame) -> pd.DataFrame:
                     "trials": len(values),
                 }
             )
+    return pd.DataFrame(rows)
+
+
+def _root_mean_square(values: np.ndarray, axis: int) -> np.ndarray:
+    return np.sqrt(np.mean(np.square(values), axis=axis))
+
+
+def chosen_risk(frame: pd.DataFrame, confidence: float) -> pd.DataFrame:
+    """Per arm: how the risk of the portfolios it chose compares with their outcome.
+
+    Every run holds its portfolios over the same number of trading days, so
+    the mean of the runs' breach rates is the share of all held days whose
+    realized return fell below the chosen portfolio's scenario VaR, and the
+    root mean square of the runs' volatility ratios is the ratio over all
+    held days. Both come with bootstrap intervals over trials, and the breach
+    rate with the binomial band, the range of shares that a VaR stating the
+    risk correctly gives over that many independent days at ``CONFIDENCE``.
+    The band ignores that every arm is read on the same days; ``no_fit``'s
+    row, which also picks the portfolios its scenarios understate most, is the
+    reference to read the others against, and ``rebalancing_comparisons.csv``
+    pairs them by trial.
+
+    Raises
+    ------
+    ValueError
+        If a run has no chosen-portfolio record, as a run recorded before it
+        existed and resumed into the file, or the runs hold their portfolios
+        over different numbers of days.
+    """
+    if frame[["chosen_days", *CHOSEN_METRICS]].isna().any(axis=None):
+        raise ValueError(
+            "Some runs have no chosen-portfolio record; the file mixes runs "
+            "recorded before it existed. Rerun the rebalancing from scratch."
+        )
+    days = frame["chosen_days"].map(np.sum)
+    if days.nunique() != 1:
+        raise ValueError(
+            f"The runs hold their portfolios over {sorted(days.unique())} days; "
+            f"the chosen-portfolio readings need one count."
+        )
+    level = 1 - confidence
+    rows = []
+    for arm, runs in frame.groupby("arm", sort=False):
+        total = int(days.loc[runs.index].sum())
+        breaches = runs["chosen_breach_rate"].to_numpy(dtype=float)
+        ratios = runs["chosen_volatility_ratio"].to_numpy(dtype=float)
+        holdings = runs["chosen_effective_holdings"].to_numpy(dtype=float)
+        breach_low, breach_high = bootstrap_interval(
+            breaches, np.mean, np.random.default_rng(BOOTSTRAP_SEED)
+        )
+        ratio_low, ratio_high = bootstrap_interval(
+            ratios, _root_mean_square, np.random.default_rng(BOOTSTRAP_SEED)
+        )
+        band_low, band_high = binom.interval(CONFIDENCE, total, level)
+        rows.append(
+            {
+                "arm": arm,
+                "trials": len(runs),
+                "days": total,
+                "var_level": level,
+                "breach_rate": float(breaches.mean()),
+                "breach_ci_low": breach_low,
+                "breach_ci_high": breach_high,
+                "breach_band_low": float(band_low / total),
+                "breach_band_high": float(band_high / total),
+                "volatility_ratio": float(_root_mean_square(ratios, axis=0)),
+                "volatility_ratio_ci_low": ratio_low,
+                "volatility_ratio_ci_high": ratio_high,
+                "effective_holdings": float(holdings.mean()),
+            }
+        )
     return pd.DataFrame(rows)
 
 
@@ -267,20 +372,33 @@ def write_rebalancing_report(results_path: Path, output_dir: Path) -> list[Path]
     Raises
     ------
     ValueError
-        If fewer trials than the report needs have every arm's run, or the
-        reference arm is missing.
+        If fewer trials than the report needs have every arm's run, the
+        reference arm is missing, or the swap design or the expected-return
+        attribution is incomplete.
     """
     frame, metadata = read_results(results_path)
     frame = complete_runs(frame, tuple(metadata.identity["arms"]))
     per_trial = per_trial_frame(frame)
     styles = arm_styles(per_trial)
     table = comparisons(per_trial)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    files = []
-    for name, data in {
+    tables = {
         "rebalancing_summary": summary(per_trial),
         "rebalancing_comparisons": table,
-    }.items():
+        "rebalancing_chosen_risk": chosen_risk(
+            frame, metadata.identity["rebalancing"]["cvar"]["confidence"]
+        ),
+    }
+    design = swap_design(metadata.identity["arms"])
+    if design is not None:
+        tables["rebalancing_swap_effects"] = swap_effects(per_trial, METRICS, design)
+    attribution = mean_attribution_design(metadata.identity["arms"])
+    if attribution is not None:
+        tables["rebalancing_mean_attribution"] = mean_attribution(
+            per_trial, METRICS, attribution
+        )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    files = []
+    for name, data in tables.items():
         path = output_dir / f"{name}.csv"
         data.to_csv(path, index=False)
         files.append(path)

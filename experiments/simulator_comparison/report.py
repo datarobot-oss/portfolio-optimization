@@ -6,13 +6,17 @@
 It reads the results file and the price file they were measured on, so it
 re-renders without rerunning any arm. It answers which arm gives the most
 realistic scenarios on average (by the energy score of the joint next-day
-distribution), how every reading changes across market regimes of the origins
-(``regimes``), and what each arm costs to generate. Run it as
-``python -m experiments.simulator_comparison.report``.
-
-Colors follow the simulator, so the CPU and GPU arm of one simulator share a
-hue; the device is the second channel: filled marks are CPU, hollow marks GPU,
-and every axis label names the arm. The ``no_fit`` reference is gray.
+distribution and by two scores that react to wrong dependence, the variogram
+score and the portfolio CRPS), how the portfolio readings change with the
+portfolio size (``portfolio_analysis``), how every reading changes across
+market regimes of the origins (``regimes``) and over the horizons after the
+origin, and what each arm costs to generate. With the dependence swap arms
+(``swaps``) it also splits every reading into what JointFM's marginals and
+its dependence cause (``swap_effects.csv``). Every table holds every horizon
+in its ``horizon`` column; the figures other than the horizon figures show
+the next day. Run it as
+``python -m experiments.simulator_comparison.report``. The figures follow
+the shared look of ``plotting``.
 """
 
 import argparse
@@ -23,13 +27,12 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from matplotlib.figure import Figure
-from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator, PercentFormatter
 
 from .analysis import (
     COMPARED_SCORES,
     PIT_COLUMNS,
+    RANKING_SCORES,
     REFERENCE_ARM,
     SKILL_SCORES,
     aggregate,
@@ -39,10 +42,43 @@ from .analysis import (
     reliability,
     skill,
     skill_summary,
+    stack_horizons,
     summary,
+    swap_design,
+    swap_effects,
     timing,
 )
 from .config import load_config
+from .plotting import (
+    GRID,
+    INK,
+    INK_SECONDARY,
+    INTERVAL_TICKS,
+    JITTER_SEED,
+    LINE_WIDTH,
+    MARKER_AREA,
+    MARKER_EDGE,
+    SURFACE,
+    ArmStyle,
+    _arm_axis,
+    _arm_legend,
+    _box,
+    _curves,
+    _device_legend,
+    _dots,
+    _figure,
+    _interval_panel,
+    _save,
+    _target_line,
+    _title,
+    arm_styles,
+)
+from .portfolio_analysis import portfolio_pit, size_curves
+from .portfolio_report import (
+    plot_portfolio_horizons,
+    plot_portfolio_pit,
+    plot_portfolio_sizes,
+)
 from .regimes import (
     FEATURES,
     OVERALL,
@@ -53,36 +89,34 @@ from .regimes import (
     terciles,
 )
 from .runner import load_prices
-from .scores import PIT_BINS, TRAILING_STD_WINDOW, ScenarioScores
+from .scores import (
+    PIT_BINS,
+    PORTFOLIO_CRPS,
+    PORTFOLIO_READINGS,
+    TRAILING_STD_WINDOW,
+    VARIOGRAM_ORDER,
+    ScenarioScores,
+    cell_column,
+    recorded_cells,
+)
 from .table import read_results
 
-SURFACE = "#fcfcfb"
-INK = "#0b0b0b"
-INK_SECONDARY = "#52514e"
-MUTED = "#898781"
-GRID = "#e1e0d9"
-AXIS = "#c3c2b7"
-# Categorical slots 1-3 of the reference palette, validated all-pairs; the
-# reference arm is gray because it is the baseline, not a contender.
-SIMULATOR_COLORS = {
-    "no_fit": MUTED,
-    "gaussian": "#1baf7a",
-    "kde": "#eb6834",
-    "jointfm": "#2a78d6",
-}
-SIMULATOR_ORDER = ("no_fit", "gaussian", "kde", "jointfm")
-DEVICE_ORDER = ("CPU", "GPU")
 # (title, unit, target or None) per compared score. A score with a target is
 # drawn as each arm's level against it; one without, where lower is better, as
 # each arm's paired difference from the reference arm.
 SCORE_LABELS = {
-    "crps": ("CRPS per asset", "trailing-volatility units", None),
+    "crps": ("CRPS per asset", "trailing volatility × √h units", None),
     "energy_score": (
         "Energy score of the asset vector",
-        "trailing-volatility units",
+        "trailing volatility × √h units",
         None,
     ),
-    "spread": ("Spread", "scenario std over trailing volatility", 1.0),
+    "variogram_score": (
+        f"Variogram score of order {VARIOGRAM_ORDER}",
+        "trailing volatility × √h units",
+        None,
+    ),
+    "spread": ("Spread", "scenario std over trailing volatility × √h", 1.0),
     "cover_50": ("50 % interval coverage", "share of outcomes inside", 0.5),
     "cover_90": ("90 % interval coverage", "share of outcomes inside", 0.9),
     "corr_error_trailing": (
@@ -105,8 +139,23 @@ SCORE_LABELS = {
         "share of origins",
         0.05,
     ),
+    "mean_correlation": (
+        "Expected-return correlation with realized returns",
+        "correlation across assets; 0 carries no information",
+        0.0,
+    ),
+    PORTFOLIO_CRPS: (
+        "Portfolio CRPS, mean over portfolios",
+        "portfolio trailing volatility × √h units",
+        None,
+    ),
 }
-SKILL_LABELS = {"energy_score": "Energy-score skill", "crps": "CRPS skill"}
+SKILL_LABELS = {
+    "energy_score": "Energy-score skill",
+    "variogram_score": "Variogram-score skill",
+    PORTFOLIO_CRPS: "Portfolio-CRPS skill",
+    "crps": "CRPS skill",
+}
 FEATURE_LABELS = {
     "window_correlation": "look-back window's mean pairwise correlation",
     "volatility_ratio": f"volatility ratio, last {TRAILING_STD_WINDOW} returns "
@@ -116,51 +165,13 @@ FEATURE_LABELS = {
 }
 # Share of a regime column that one regime's arms spread across.
 REGIME_GROUP_WIDTH = 0.7
-FIGURE_DPI = 150
-# Scatter area in points^2; a 6 pt (8 px at 96 dpi) marker.
-MARKER_AREA = 36
-MARKER_EDGE = 1.5
-# The estimate's marker in a point-and-interval row: a 9 pt circle.
-INTERVAL_MARKER_AREA = 81
-INTERVAL_TICKS = 5
-LINE_WIDTH = 2
-JITTER = 0.12
-# Fixed so the dot jitter is identical on every re-render.
-JITTER_SEED = 0
-BOX_WIDTH = 0.3
-# Whiskers at the minimum and maximum, so a box draws no outlier dots.
-BOX_WHISKERS = (0, 100)
+PANEL_COLUMNS = 3
 
 
 def _duration(seconds: float) -> str:
     if seconds < 1:
         return f"{1000 * seconds:.3g} ms"
     return f"{seconds:.3g} s"
-
-
-@dataclass(frozen=True)
-class ArmStyle:
-    """How one arm is drawn: hue by simulator, fill by device."""
-
-    name: str
-    fit_type: str
-    device: str
-
-    @property
-    def color(self) -> str:
-        return SIMULATOR_COLORS[self.fit_type]
-
-    @property
-    def filled(self) -> bool:
-        return self.device == "CPU"
-
-    @property
-    def label(self) -> str:
-        return f"{self.fit_type}\n{self.device}"
-
-    @property
-    def inline_label(self) -> str:
-        return f"{self.fit_type} · {self.device}"
 
 
 @dataclass(frozen=True)
@@ -171,232 +182,56 @@ class ReportOutputs:
     excluded_trials: list[int]
 
 
-def arm_styles(per_trial: pd.DataFrame) -> list[ArmStyle]:
-    """Arms in simulator order, CPU before GPU."""
-    arms = per_trial.groupby("arm")[["fit_type", "device"]].first()
-    styles = [ArmStyle(name, row.fit_type, row.device) for name, row in arms.iterrows()]
-
-    def order(style: ArmStyle) -> tuple[int, int]:
-        return (
-            SIMULATOR_ORDER.index(style.fit_type),
-            DEVICE_ORDER.index(style.device),
-        )
-
-    return sorted(styles, key=order)
-
-
-def _figure(width: float, height: float, rows: int = 1, cols: int = 1):
-    figure = Figure(figsize=(width, height), facecolor=SURFACE, layout="constrained")
-    axes = figure.subplots(rows, cols, squeeze=False)
-    for ax in axes.flat:
-        _style_axes(ax)
-    return figure, axes
-
-
-def _style_axes(ax) -> None:
-    ax.set_facecolor(SURFACE)
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_color(AXIS)
-        ax.spines[side].set_linewidth(1)
-    ax.tick_params(colors=AXIS, labelcolor=INK_SECONDARY, labelsize=8)
-    ax.grid(axis="y", color=GRID, linewidth=1)
-    ax.set_axisbelow(True)
-
-
-def _title(ax, title: str, subtitle: str) -> None:
-    ax.set_title(title, loc="left", color=INK, fontsize=10, pad=14)
-    ax.text(
-        0,
-        1.01,
-        subtitle,
-        transform=ax.transAxes,
-        color=MUTED,
-        fontsize=8,
-        va="bottom",
-    )
-
-
-def _dots(ax, x: float, values: np.ndarray, style: ArmStyle, rng, alpha=1.0) -> None:
-    offsets = rng.uniform(-JITTER, JITTER, size=len(values))
-    ax.scatter(
-        x + offsets,
-        values,
-        s=MARKER_AREA,
-        facecolor=style.color if style.filled else SURFACE,
-        edgecolor=SURFACE if style.filled else style.color,
-        linewidth=MARKER_EDGE,
-        alpha=alpha,
-        zorder=3,
-    )
-
-
-def _box(ax, x: float, values: np.ndarray, style: ArmStyle) -> None:
-    line = {"color": style.color, "linewidth": 1}
-    ax.boxplot(
-        values,
-        positions=[x],
-        widths=BOX_WIDTH,
-        whis=BOX_WHISKERS,
-        patch_artist=True,
-        boxprops={
-            "facecolor": style.color if style.filled else SURFACE,
-            "edgecolor": style.color,
-            "linewidth": 1,
-        },
-        medianprops={**line, "color": SURFACE if style.filled else style.color},
-        whiskerprops=line,
-        capprops=line,
-        manage_ticks=False,
-        zorder=3,
-    )
-
-
-def _arm_axis(ax, styles: Sequence[ArmStyle]) -> None:
-    ax.set_xticks(range(len(styles)), [style.label for style in styles])
-    ax.set_xlim(-0.6, len(styles) - 0.4)
-
-
-def _target_line(ax, target: float) -> None:
-    ax.axhline(target, color=INK_SECONDARY, linewidth=1, zorder=2)
-
-
-def _interval_panel(
-    ax,
-    rows: Sequence[tuple[ArmStyle, float, float, float]],
-    *,
-    reference: float,
-    reference_label: str,
-) -> None:
-    """One row per arm: a point at its estimate and a line across its interval.
-
-    ``rows`` holds (style, estimate, interval low, interval high), drawn top to
-    bottom; a vertical line marks ``reference``, labeled at the bottom.
-    """
-    ax.grid(axis="y", visible=False)
-    ax.grid(axis="x", color=GRID, linewidth=1)
-    ax.axvline(reference, color=INK_SECONDARY, linewidth=1, zorder=2)
-    ax.annotate(
-        reference_label,
-        xy=(reference, 0),
-        xycoords=("data", "axes fraction"),
-        xytext=(3, 3),
-        textcoords="offset points",
-        color=MUTED,
-        fontsize=8,
-    )
-    for position, (style, estimate, low, high) in enumerate(rows):
-        ax.hlines(position, low, high, color=style.color, linewidth=LINE_WIDTH)
-        ax.scatter(
-            [estimate],
-            [position],
-            s=INTERVAL_MARKER_AREA,
-            facecolor=style.color if style.filled else SURFACE,
-            edgecolor=style.color,
-            linewidth=MARKER_EDGE,
-            zorder=3,
-        )
-    ax.set_yticks(range(len(rows)), [row[0].inline_label for row in rows])
-    ax.set_ylim(len(rows) - 0.4, -0.6)
-    # Small differences carry long tick labels; more ticks would overlap.
-    ax.xaxis.set_major_locator(MaxNLocator(nbins=INTERVAL_TICKS))
-
-
-def _device_legend(figure) -> None:
-    handles = [
-        Line2D(
-            [],
-            [],
-            marker="o",
-            linestyle="",
-            markersize=7,
-            markerfacecolor=MUTED if device == "CPU" else SURFACE,
-            markeredgecolor=SURFACE if device == "CPU" else MUTED,
-            markeredgewidth=MARKER_EDGE,
-            label=f"{device} ({'filled' if device == 'CPU' else 'hollow'})",
-        )
-        for device in DEVICE_ORDER
-    ]
-    figure.legend(
-        handles=handles,
-        loc="outside lower center",
-        ncols=len(handles),
-        frameon=False,
-        fontsize=8,
-        labelcolor=INK_SECONDARY,
-    )
-
-
-def _arm_legend(figure, styles: Sequence[ArmStyle]) -> None:
-    handles = [
-        Line2D(
-            [],
-            [],
-            marker="o",
-            linestyle="",
-            markersize=7,
-            markerfacecolor=style.color if style.filled else SURFACE,
-            markeredgecolor=style.color,
-            markeredgewidth=MARKER_EDGE,
-            label=style.inline_label,
-        )
-        for style in styles
-    ]
-    figure.legend(
-        handles=handles,
-        loc="outside lower center",
-        ncols=len(handles),
-        frameon=False,
-        fontsize=8,
-        labelcolor=INK_SECONDARY,
-    )
-
-
-def _save(figure: Figure, directory: Path, name: str) -> list[Path]:
-    paths = [directory / f"{name}.png", directory / f"{name}.svg"]
-    figure.savefig(paths[0], dpi=FIGURE_DPI, facecolor=SURFACE)
-    figure.savefig(paths[1], facecolor=SURFACE)
-    return paths
-
-
 def plot_ranking(ranks: pd.DataFrame, styles: Sequence[ArmStyle], directory: Path):
-    """Each arm's share of trials won by energy score, best mean rank on top."""
+    """Each arm's share of trials won, one panel per ranking score side by side.
+
+    Every panel lists the arms by that score's mean rank, best on top, so an
+    arm that wins on the energy score but loses on a dependence-aware score
+    stands out across the row.
+    """
     by_name = {style.name: style for style in styles}
-    order = list(ranks.index)
-    figure, axes = _figure(8, 0.55 * len(order) + 1.6)
-    ax = axes[0, 0]
-    ax.grid(axis="y", visible=False)
-    ax.grid(axis="x", color=GRID, linewidth=1)
-    for position, arm in enumerate(order):
-        style = by_name[arm]
-        share = ranks.loc[arm, "share_won"]
-        ax.barh(
-            position,
-            share,
-            height=0.5,
-            color=style.color if style.filled else SURFACE,
-            edgecolor=style.color,
-            linewidth=LINE_WIDTH,
+    figure, axes = _figure(
+        6 * len(RANKING_SCORES), 0.55 * len(styles) + 1.6, cols=len(RANKING_SCORES)
+    )
+    for ax, score in zip(axes.flat, RANKING_SCORES):
+        rows = ranks[ranks["score"] == score].set_index("arm")
+        order = list(rows.index)
+        ax.grid(axis="y", visible=False)
+        ax.grid(axis="x", color=GRID, linewidth=1)
+        for position, arm in enumerate(order):
+            style = by_name[arm]
+            share = rows.loc[arm, "share_won"]
+            ax.barh(
+                position,
+                share,
+                height=0.5,
+                color=style.color if style.filled else SURFACE,
+                edgecolor=style.color,
+                linewidth=LINE_WIDTH,
+            )
+            ax.text(
+                share + 0.01,
+                position,
+                f"{share:.0%} won · mean rank {rows.loc[arm, 'mean_rank']:.2f}",
+                va="center",
+                color=INK_SECONDARY,
+                fontsize=8,
+            )
+        ax.set_yticks(range(len(order)), [by_name[arm].inline_label for arm in order])
+        ax.invert_yaxis()
+        # Room right of a full bar for its label; ticks stop at 100 %.
+        ax.set_xlim(0, 1.45)
+        ax.set_xticks(np.linspace(0, 1, 6))
+        ax.xaxis.set_major_formatter(PercentFormatter(1.0))
+        _title(
+            ax,
+            SCORE_LABELS[score][0],
+            "share of trials in which the arm had the lowest score",
         )
-        ax.text(
-            share + 0.01,
-            position,
-            f"{share:.0%} won · mean rank {ranks.loc[arm, 'mean_rank']:.2f}",
-            va="center",
-            color=INK_SECONDARY,
-            fontsize=8,
-        )
-    ax.set_yticks(range(len(order)), [by_name[arm].inline_label for arm in order])
-    ax.invert_yaxis()
-    # Room right of a full bar for its label; ticks stop at 100 %.
-    ax.set_xlim(0, 1.3)
-    ax.set_xticks(np.linspace(0, 1, 6))
-    ax.xaxis.set_major_formatter(PercentFormatter(1.0))
-    _title(
-        ax,
-        "Most realistic scenarios",
-        "share of trials in which the arm had the lowest energy score",
+    figure.suptitle(
+        "Most realistic scenarios, by each proper score on its own",
+        color=INK,
+        fontsize=10,
     )
     _device_legend(figure)
     return _save(figure, directory, "ranking")
@@ -417,7 +252,10 @@ def plot_scores(
     """
     contenders = [style for style in styles if style.name != REFERENCE_ARM]
     differences = table[table["reference"] == REFERENCE_ARM]
-    figure, axes = _figure(13, 9, rows=3, cols=3)
+    rows = -(-len(COMPARED_SCORES) // PANEL_COLUMNS)
+    figure, axes = _figure(13, 3 * rows, rows=rows, cols=PANEL_COLUMNS)
+    for ax in list(axes.flat)[len(COMPARED_SCORES) :]:
+        ax.set_visible(False)
     for ax, column in zip(axes.flat, COMPARED_SCORES):
         title, unit, target = SCORE_LABELS[column]
         if target is None:
@@ -469,7 +307,7 @@ def plot_skill(
     """Per-trial skill against the reference, with the median and its interval."""
     rng = np.random.default_rng(JITTER_SEED)
     contenders = [style for style in styles if style.name != REFERENCE_ARM]
-    figure, axes = _figure(12, 5, cols=len(SKILL_SCORES))
+    figure, axes = _figure(5 * len(SKILL_SCORES), 5, cols=len(SKILL_SCORES))
     for ax, score in zip(axes.flat, SKILL_SCORES):
         ax.axhline(0, color=INK_SECONDARY, linewidth=1, zorder=2)
         for position, style in enumerate(contenders):
@@ -668,10 +506,83 @@ def _regime_panel(
 
 
 def _cells(
-    table: pd.DataFrame, columns: Sequence[str]
-) -> dict[tuple[str, str, str], tuple[float, float, float]]:
-    keyed = table.set_index(["feature", "regime", "arm"])[list(columns)]
+    table: pd.DataFrame, columns: Sequence[str], keys: Sequence[str]
+) -> dict[tuple, tuple[float, float, float]]:
+    keyed = table.set_index([*keys, "arm"])[list(columns)]
     return {key: tuple(row) for key, row in zip(keyed.index, keyed.to_numpy())}
+
+
+def _reading_panels(
+    readings: dict[str, pd.DataFrame], styles: Sequence[ArmStyle], keys: Sequence[str]
+) -> list[tuple]:
+    """One panel per compared score and skill, drawn as in ``plot_scores`` and
+    ``plot_skill``.
+
+    ``readings`` holds the ``summary``, ``comparisons``, and ``skill`` tables
+    with the columns ``keys`` that name each panel position, such as the
+    feature and regime, or the horizon. A score where lower is better is each
+    arm's median paired difference from the reference arm, a score with a
+    target each arm's mean over trials against the target, and a skill each
+    arm's median skill.
+
+    Returns
+    -------
+    list of tuple
+        (title, unit, arms, values, reference) per panel, where ``values``
+        maps (*key values, arm) to (estimate, interval low, interval high).
+    """
+    contenders = [style for style in styles if style.name != REFERENCE_ARM]
+    differences = readings["comparisons"][
+        readings["comparisons"]["reference"] == REFERENCE_ARM
+    ]
+    levels = readings["summary"]
+    skills = readings["skill"]
+    panels = []
+    for column in COMPARED_SCORES:
+        title, unit, target = SCORE_LABELS[column]
+        if target is None:
+            panels.append(
+                (
+                    title,
+                    f"{unit}, minus {REFERENCE_ARM}; lower is better",
+                    contenders,
+                    _cells(
+                        differences[differences["metric"] == column],
+                        ["median_difference", "ci_low", "ci_high"],
+                        keys,
+                    ),
+                    0.0,
+                )
+            )
+        else:
+            panels.append(
+                (
+                    title,
+                    f"{unit}, mean over trials; target {target:g}",
+                    styles,
+                    _cells(
+                        levels[levels["metric"] == column],
+                        ["mean", "ci_low", "ci_high"],
+                        keys,
+                    ),
+                    target,
+                )
+            )
+    for score in SKILL_SCORES:
+        panels.append(
+            (
+                SKILL_LABELS[score],
+                f"% better than {REFERENCE_ARM}, median over trials",
+                contenders,
+                _cells(
+                    skills[skills["score"] == score],
+                    ["median_skill", "ci_low", "ci_high"],
+                    keys,
+                ),
+                0.0,
+            )
+        )
+    return panels
 
 
 def plot_regimes(
@@ -689,54 +600,7 @@ def plot_regimes(
     each arm's median skill. Each panel's first column holds the readings over
     all origins, the next three the feature's terciles, low to high.
     """
-    contenders = [style for style in styles if style.name != REFERENCE_ARM]
-    differences = readings["comparisons"][
-        readings["comparisons"]["reference"] == REFERENCE_ARM
-    ]
-    panels = []
-    for column in COMPARED_SCORES:
-        title, unit, target = SCORE_LABELS[column]
-        if target is None:
-            panels.append(
-                (
-                    title,
-                    f"{unit}, minus {REFERENCE_ARM}; lower is better",
-                    contenders,
-                    _cells(
-                        differences[differences["metric"] == column],
-                        ["median_difference", "ci_low", "ci_high"],
-                    ),
-                    0.0,
-                )
-            )
-        else:
-            levels = readings["summary"]
-            panels.append(
-                (
-                    title,
-                    f"{unit}, mean over trials; target {target:g}",
-                    styles,
-                    _cells(
-                        levels[levels["metric"] == column],
-                        ["mean", "ci_low", "ci_high"],
-                    ),
-                    target,
-                )
-            )
-    for score in SKILL_SCORES:
-        skills = readings["skill"]
-        panels.append(
-            (
-                SKILL_LABELS[score],
-                f"% better than {REFERENCE_ARM}, median over trials",
-                contenders,
-                _cells(
-                    skills[skills["score"] == score],
-                    ["median_skill", "ci_low", "ci_high"],
-                ),
-                0.0,
-            )
-        )
+    panels = _reading_panels(readings, styles, ["feature", "regime"])
     files = []
     for feature in FEATURES:
         rows = bounds[bounds["feature"] == feature].set_index("regime")
@@ -745,7 +609,8 @@ def plot_regimes(
             f"{name}\n{rows.loc[name, 'low']:.2f} to {rows.loc[name, 'high']:.2f}"
             for name in REGIMES
         ]
-        figure, axes = _figure(14, 15, rows=4, cols=3)
+        rows = -(-len(panels) // PANEL_COLUMNS)
+        figure, axes = _figure(14, 3.75 * rows, rows=rows, cols=PANEL_COLUMNS)
         for ax, (title, unit, arms, values, reference) in zip(axes.flat, panels):
             _regime_panel(ax, columns, labels, arms, values, reference=reference)
             ax.yaxis.set_major_locator(MaxNLocator(nbins=INTERVAL_TICKS))
@@ -763,12 +628,66 @@ def plot_regimes(
     return files
 
 
+def plot_horizons(
+    readings: dict[str, pd.DataFrame], styles: Sequence[ArmStyle], directory: Path
+) -> list[Path]:
+    """Every score and skill over the horizon, one panel each.
+
+    ``readings`` holds the ``summary``, ``comparisons``, and ``skill`` tables
+    stacked over the horizons (``stack_horizons``); the panels are those of
+    ``plot_regimes`` (``_reading_panels``), each arm a line through its
+    estimates at the horizons, with its interval at each.
+    """
+    panels = _reading_panels(readings, styles, ["horizon"])
+    horizons = sorted(readings["summary"]["horizon"].unique())
+    rows = -(-len(panels) // PANEL_COLUMNS)
+    figure, axes = _figure(14, 3.6 * rows, rows=rows, cols=PANEL_COLUMNS)
+    for ax, (title, unit, arms, values, reference) in zip(axes.flat, panels):
+        table = pd.DataFrame(
+            [
+                (horizon, style.name, *values[(horizon, style.name)])
+                for horizon in horizons
+                for style in arms
+            ],
+            columns=["horizon", "arm", "estimate", "ci_low", "ci_high"],
+        )
+        _target_line(ax, reference)
+        _curves(ax, table, "horizon", arms)
+        ax.set_xlabel("trading days after the origin", fontsize=8)
+        _title(ax, title, unit)
+    for ax in list(axes.flat)[len(panels) :]:
+        ax.set_visible(False)
+    figure.suptitle(
+        "Readings over the horizon after the origin: point and 95 % bootstrap "
+        "interval over trials",
+        color=INK,
+        fontsize=10,
+    )
+    _arm_legend(figure, styles)
+    return _save(figure, directory, "horizons")
+
+
 def _check_scores_recorded(identity: dict) -> None:
     recorded = [m["columns"] for m in identity["measurements"]]
     if list(ScenarioScores.columns) not in recorded:
         raise ValueError(
             "The results file holds no ScenarioScores columns, so it cannot be "
             "reported."
+        )
+    if not any(PORTFOLIO_CRPS in columns for columns in recorded):
+        raise ValueError(
+            "The results file holds no PortfolioScores columns, so it cannot be "
+            "reported."
+        )
+    if "horizons" not in identity["experiment"]:
+        raise ValueError(
+            "The results file records no horizons, so it cannot be reported; "
+            "rerun it from scratch."
+        )
+    if "origin_history" not in identity["experiment"]:
+        raise ValueError(
+            "The results file records no origin_history, so its trials cannot be "
+            "drawn again; rerun it from scratch."
         )
 
 
@@ -784,16 +703,19 @@ def write_report(
     regime readings recompute each origin's features from it. ``exclude_arms``
     leaves arms out of the report, for example an arm whose session is still
     running: a trial counts as complete when every reported arm has every
-    origin, so an unfinished arm would otherwise hold back all trials it has
-    not reached.
+    origin at every horizon, so an unfinished arm would otherwise hold back
+    all trials it has not reached. Every statistic is computed per horizon;
+    the tables stack them, and the figures other than the horizon figures
+    show the next day.
 
     Raises
     ------
     ValueError
-        If the file holds no scenario scores, the price file is not the one the
-        results were measured on, an excluded arm is not in the file, the
+        If the file holds no scenario or portfolio scores or no horizons, the
+        price file is not the one the results were measured on, an excluded arm is not in the file, the
         reference arm is missing or excluded, fewer trials are complete than
-        the report needs, or a regime holds too few trials or has tied bounds.
+        the report needs, a regime holds too few trials or has tied bounds, or
+        the swap design is incomplete.
     """
     frame, metadata = read_results(results_path)
     identity = metadata.identity
@@ -806,28 +728,60 @@ def write_report(
         )
     arms = tuple(arm for arm in identity["arms"] if arm not in exclude_arms)
     frame = frame[frame["arm"].isin(arms)]
-    frame, excluded = complete_trials(frame, arms, identity["experiment"]["origins"])
-    per_trial = aggregate(frame)
-    styles = arm_styles(per_trial)
-    skills = skill(per_trial)
-    skill_medians = skill_summary(skills)
-    ranks = ranking(per_trial)
-    means, speedups = timing(per_trial)
-    levels = reliability(per_trial)
-    features = origin_features(load_prices(prices_path), frame, identity["experiment"])
+    experiment = identity["experiment"]
+    horizons = experiment["horizons"]
+    frame, excluded = complete_trials(frame, arms, experiment["origins"], len(horizons))
+    frames = {horizon: frame[frame["horizon"] == horizon] for horizon in horizons}
+    per_trial = {horizon: aggregate(rows) for horizon, rows in frames.items()}
+    next_day = per_trial[1]
+    styles = arm_styles(next_day)
+    skills = {horizon: skill(table) for horizon, table in per_trial.items()}
+    readings = {
+        "summary": {h: summary(table) for h, table in per_trial.items()},
+        "comparisons": {h: comparisons(table) for h, table in per_trial.items()},
+        "skill": {h: skill_summary(table) for h, table in skills.items()},
+        "ranking": {h: ranking(table) for h, table in per_trial.items()},
+        "portfolio_sizes": {h: size_curves(table) for h, table in per_trial.items()},
+        "portfolio_pit": {h: portfolio_pit(table) for h, table in per_trial.items()},
+        "reliability": {
+            h: reliability(table).rename_axis("arm").reset_index()
+            for h, table in per_trial.items()
+        },
+    }
+    means, speedups = timing(next_day)
+    features = origin_features(load_prices(prices_path), frame, experiment)
     regimes, bounds = terciles(features)
-    readings = regime_readings(frame, regimes)
+    regime_tables = {
+        horizon: regime_readings(rows, regimes) for horizon, rows in frames.items()
+    }
+    design = swap_design({arm: identity["arms"][arm] for arm in arms})
+    if design is not None:
+        effect_columns = [
+            *COMPARED_SCORES,
+            *(
+                cell_column(kind, size, reading)
+                for kind, size in recorded_cells(frame.columns)
+                for reading in PORTFOLIO_READINGS
+                if not reading.startswith("pit_")
+            ),
+        ]
+        readings["swap_effects"] = {
+            h: swap_effects(table, effect_columns, design)
+            for h, table in per_trial.items()
+        }
+    stacked = {name: stack_horizons(tables) for name, tables in readings.items()}
     tables = {
-        "summary": summary(per_trial),
-        "comparisons": comparisons(per_trial),
-        "skill": skill_medians,
-        "ranking": ranks.rename_axis("arm").reset_index(),
+        **stacked,
         "timing": means.reset_index(),
         "speedup": speedups,
-        "reliability": levels.rename_axis("arm").reset_index(),
         "origin_features": features.join(regimes, rsuffix="_regime").reset_index(),
         "regimes": bounds,
-        **{f"regime_{name}": table for name, table in readings.items()},
+        **{
+            f"regime_{name}": stack_horizons(
+                {h: by_name[name] for h, by_name in regime_tables.items()}
+            )
+            for name in regime_tables[1]
+        },
     }
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -836,13 +790,19 @@ def write_report(
         path = output_dir / f"{name}.csv"
         table.to_csv(path, index=False)
         files.append(path)
-    files += plot_ranking(ranks, styles, output_dir)
-    files += plot_scores(tables["comparisons"], tables["summary"], styles, output_dir)
-    files += plot_skill(skills, skill_medians, styles, output_dir)
-    files += plot_pit(per_trial, styles, output_dir)
-    files += plot_reliability(levels, styles, output_dir)
-    files += plot_timing(frame, means, speedups, styles, output_dir)
-    files += plot_regimes(readings, bounds, styles, output_dir)
+    files += plot_ranking(readings["ranking"][1], styles, output_dir)
+    files += plot_scores(
+        readings["comparisons"][1], readings["summary"][1], styles, output_dir
+    )
+    files += plot_skill(skills[1], readings["skill"][1], styles, output_dir)
+    files += plot_pit(next_day, styles, output_dir)
+    files += plot_reliability(reliability(next_day), styles, output_dir)
+    files += plot_timing(frames[1], means, speedups, styles, output_dir)
+    files += plot_regimes(regime_tables[1], bounds, styles, output_dir)
+    files += plot_portfolio_sizes(readings["portfolio_sizes"][1], styles, output_dir)
+    files += plot_portfolio_pit(readings["portfolio_pit"][1], styles, output_dir)
+    files += plot_horizons(stacked, styles, output_dir)
+    files += plot_portfolio_horizons(stacked["portfolio_sizes"], styles, output_dir)
     return ReportOutputs(files=files, excluded_trials=excluded)
 
 

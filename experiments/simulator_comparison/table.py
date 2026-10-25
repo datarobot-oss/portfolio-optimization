@@ -20,7 +20,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 METADATA_KEY = b"simulator_comparison"
-KEY_COLUMNS = ("trial", "origin", "arm")
+# One arm's call at one origin writes the rows of every horizon at once, so a
+# resumed run skips the rows of a (trial, origin, arm) as a whole.
+CALL_COLUMNS = ("trial", "origin", "arm")
+KEY_COLUMNS = (*CALL_COLUMNS, "horizon")
 # Identity entries keyed by arm name, which later sessions may extend.
 ACCUMULATING_KEYS = ("arms", "services")
 

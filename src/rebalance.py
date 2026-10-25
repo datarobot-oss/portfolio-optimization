@@ -31,6 +31,7 @@ run_rebalancing
 """
 
 import os
+from collections.abc import Callable
 from datetime import datetime
 
 import matplotlib.pyplot as plt
@@ -48,6 +49,7 @@ from . import (
     risk_free,
     utils,
 )
+from .cvar_data import CvarData
 from .settings import ApiSettings, ReturnsComputeSettings, ScenarioGenerationSettings
 
 # Rebalancing triggers that re_optimize_criteria["type"] selects.
@@ -58,6 +60,13 @@ RE_OPTIMIZE_TYPES = (
     "every_step",
     "no_re_optimize",
 )
+
+
+def ignore_decision(
+    date: pd.Timestamp, cvar_data: CvarData, chosen: portfolio.Portfolio
+) -> None:
+    """Default ``decision_observer`` of ``rebalance_portfolio``: records nothing."""
+
 
 # Plot-title name of each ScenarioGenerationSettings.fit_type.
 SCENARIO_GENERATOR_NAMES = {
@@ -118,6 +127,19 @@ class rebalance_portfolio:
         credits cash with the rate quoted on its date, and the backtests,
         buy-and-hold included, accrue it as ``backtest.portfolio_backtester``
         does.
+    scenario_generator : callable, default ``cvar_utils.generate_cvar_data``
+        Builds each optimization's scenarios: called with the look-back
+        window's returns dict, ``scenario_generation_settings``, and the cash
+        return as ``cash_return``, it returns the dict with ``cvar_data``
+        added. Replace it to optimize on scenarios that no single
+        ``fit_type`` produces, such as a recombination of two simulators'.
+    decision_observer : callable, default ``ignore_decision``
+        Called after every optimization with its date, the ``CvarData`` it
+        optimized on, and the portfolio it chose, before that portfolio is
+        backtested. The buy-and-hold run that construction performs makes the
+        first call, for the trading period's first day, whose portfolio
+        ``re_optimize`` then starts from; each call of ``re_optimize`` adds
+        one per re-optimization.
     """
 
     def __init__(
@@ -135,6 +157,10 @@ class rebalance_portfolio:
         print_opt_result: bool = False,
         api_settings: ApiSettings | None = None,
         risk_free_rate: float | pd.Series = 0.0,
+        scenario_generator: Callable[..., dict] = cvar_utils.generate_cvar_data,
+        decision_observer: Callable[
+            [pd.Timestamp, CvarData, portfolio.Portfolio], None
+        ] = ignore_decision,
     ):
         """Initialize rebalancing portfolio with optimization parameters."""
         self.dataset_directory = dataset_directory
@@ -148,6 +174,8 @@ class rebalance_portfolio:
         self.solver_settings = solver_settings
         self.returns_compute_settings = returns_compute_settings
         self.scenario_generation_settings = scenario_generation_settings
+        self.scenario_generator = scenario_generator
+        self.decision_observer = decision_observer
         self.print_opt_result = print_opt_result
         self.api_settings = api_settings
         self.risk_free_rate = risk_free_rate
@@ -305,7 +333,7 @@ class rebalance_portfolio:
                     self.returns_compute_settings.return_type.upper(),
                     self.returns_compute_settings.freq,
                 )[0]
-                optimize_returns_dict = cvar_utils.generate_cvar_data(
+                optimize_returns_dict = self.scenario_generator(
                     optimize_returns_dict,
                     self.scenario_generation_settings,
                     cash_return=float(cash_return),
@@ -326,6 +354,11 @@ class rebalance_portfolio:
                 )
                 if (backtest_date == self.trading_start) and not run_re_optimize:
                     self.initial_portfolio = current_portfolio
+                self.decision_observer(
+                    backtest_date,
+                    optimize_returns_dict["cvar_data"],
+                    current_portfolio,
+                )
 
                 # Store solver time information
                 solve_time = result_row.get("solve time", None)

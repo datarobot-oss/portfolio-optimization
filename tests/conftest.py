@@ -42,11 +42,13 @@ class FakeJointFMClient:
     (capacity envelope, device, model and checkpoint versions) and a sample
     forecast whose ``samples`` axis order is ``(sample, horizon, column)`` and
     whose array is read-only. Draws scatter around each column's last history
-    value, as next log prices do.
+    value, as future log prices do, one horizon per query time.
     """
 
     def __init__(self):
-        self.envelope = SimpleNamespace(min_series=1, max_series=10, n_input=40)
+        self.envelope = SimpleNamespace(
+            min_series=1, max_series=10, n_input=40, n_output=100
+        )
         self.device = "cpu"
         self.checkpoint_version = "fake-checkpoint"
         self.sample_scale = 1.0
@@ -66,8 +68,9 @@ class FakeJointFMClient:
 
     def forecast(self, history, *, n_samples, requested_columns, **kwargs):
         rng = np.random.default_rng(kwargs["seed"])
+        shape = (n_samples, len(kwargs["query_times"]), len(requested_columns))
         samples = history[requested_columns].iloc[-1].to_numpy() + (
-            self.sample_scale * rng.normal(size=(n_samples, 1, len(requested_columns)))
+            self.sample_scale * rng.normal(size=shape)
         )
         samples.flags.writeable = False
         self.forecast_calls.append(

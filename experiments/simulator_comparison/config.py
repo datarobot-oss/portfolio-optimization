@@ -17,7 +17,15 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .arms import CONFIG_ARM_NAMES, JOINTFM_ARM
+from .arms import (
+    CONFIG_ARM_NAMES,
+    HISTORICAL_MEAN_ARM,
+    INDEPENDENT_ARM,
+    JOINTFM_ARM,
+    SWAP_DONORS,
+    WINDOW_ARM,
+    check_donors,
+)
 
 
 def _known_unique_arms(arms: tuple[str, ...]) -> tuple[str, ...]:
@@ -28,6 +36,7 @@ def _known_unique_arms(arms: tuple[str, ...]) -> tuple[str, ...]:
         )
     if len(set(arms)) != len(arms):
         raise ValueError("Each arm may run only once.")
+    check_donors(arms)
     return arms
 
 
@@ -70,7 +79,15 @@ class RebalancingConfig(BaseModel):
         min_length=1,
         description=f"Simulators to backtest, in this order: {', '.join(CONFIG_ARM_NAMES)}. "
         f"The device changes only speed, not the portfolios, so one arm per "
-        f"simulator suffices; {JOINTFM_ARM} reaches the service .env selects.",
+        f"simulator suffices; {JOINTFM_ARM} reaches the service .env selects. "
+        f"A swap-* arm is a dependence swap cell and needs its two donors listed too. "
+        f"{HISTORICAL_MEAN_ARM} optimizes on {JOINTFM_ARM}'s scenarios with the "
+        f"window's mean as expected returns, so {JOINTFM_ARM} against it isolates "
+        f"the expected returns and it against {WINDOW_ARM} the scenarios; it needs "
+        f"{JOINTFM_ARM} listed too. {INDEPENDENT_ARM}, the positive control, "
+        f"optimizes on the window's returns with each asset's rows permuted "
+        f"independently, which keeps every asset's returns and mean and removes "
+        f"all dependence; it needs {WINDOW_ARM} listed too.",
     )
     trials: int = Field(
         gt=0,
@@ -175,6 +192,13 @@ class ExperimentConfig(BaseModel):
         description="Returns per look-back window, the history every arm "
         "receives; the scores need at least 63 for the trailing volatility.",
     )
+    origin_history: int = Field(
+        gt=0,
+        description="Returns an origin needs before it to be drawn, at least "
+        "look_back. Only the trial draw reads it, so configs that differ only in "
+        "look_back draw the same origins and scenario seeds and their results "
+        "pair trial by trial (history_comparison).",
+    )
     forward: int = Field(
         gt=1,
         description="Returns after each origin kept for the forward "
@@ -192,7 +216,32 @@ class ExperimentConfig(BaseModel):
         min_length=1,
         description=f"Arms to run, in this order, each at most once: "
         f"{', '.join(CONFIG_ARM_NAMES)}. {JOINTFM_ARM} reaches the service .env "
-        f"selects and runs as jointfm-cpu or jointfm-gpu by that service's device.",
+        f"selects and runs as jointfm-cpu or jointfm-gpu by that service's device. "
+        f"A swap-<marginals>-<dependence> arm is a dependence swap cell: its marginal "
+        f"donor's scenario values per asset in its dependence donor's rank order; "
+        f"both donors (window = no_fit-cpu) must be listed too. "
+        f"{INDEPENDENT_ARM} is the window's scenarios at every horizon with each "
+        f"asset's rows permuted independently, and needs {WINDOW_ARM} listed too. "
+        f"{HISTORICAL_MEAN_ARM} runs only in rebalancing.arms.",
+    )
+    portfolio_sizes: tuple[int, ...] = Field(
+        min_length=1,
+        description="Numbers of assets the scored portfolios hold, strictly "
+        "increasing and at most assets. At every origin each size gets random "
+        "asset subsets carrying an equal-weight portfolio and, where "
+        "rebalancing.cvar's weight, cash, and leverage bounds allow one at that "
+        "size, a random long-only and a random long-short portfolio. Size 1 reads "
+        "the per-asset distributions alone; larger sizes read the dependence ever "
+        "more.",
+    )
+    horizons: tuple[int, ...] = Field(
+        min_length=1,
+        description="Trading days after each origin at which every arm is "
+        "scored, strictly increasing, starting at 1 (the next day, which every "
+        "single-horizon reading of the report shows), and at most forward. "
+        "JointFM forecasts all of them in one request; every other arm's h-day "
+        "scenario is the sum of h independent one-day draws of its own "
+        "simulator. Each horizon adds one results row per (trial, origin, arm).",
     )
 
     rebalancing: RebalancingConfig = Field(
@@ -203,7 +252,73 @@ class ExperimentConfig(BaseModel):
     @field_validator("arms")
     @classmethod
     def known_unique_arms(cls, arms: tuple[str, ...]) -> tuple[str, ...]:
+        if HISTORICAL_MEAN_ARM in arms:
+            raise ValueError(
+                f"{HISTORICAL_MEAN_ARM} runs only in rebalancing.arms: its scenarios "
+                f"are {JOINTFM_ARM}'s and its expected returns the window's, which "
+                f"{WINDOW_ARM} already reads."
+            )
         return _known_unique_arms(arms)
+
+    @model_validator(mode="after")
+    def portfolio_sizes_fit(self) -> "ExperimentConfig":
+        sizes = self.portfolio_sizes
+        if sizes[0] < 1 or any(b <= a for a, b in zip(sizes, sizes[1:])):
+            raise ValueError(
+                f"portfolio_sizes {list(sizes)} must be positive and strictly "
+                f"increasing."
+            )
+        if sizes[-1] > self.assets:
+            raise ValueError(
+                f"portfolio_sizes {list(sizes)} exceed the {self.assets} assets of "
+                f"a trial."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def origins_hold_the_window(self) -> "ExperimentConfig":
+        if self.origin_history < self.look_back:
+            raise ValueError(
+                f"origin_history {self.origin_history} must be at least look_back "
+                f"{self.look_back}, or an origin could lack its window."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def horizons_fit(self) -> "ExperimentConfig":
+        horizons = self.horizons
+        if horizons[0] != 1 or any(b <= a for a, b in zip(horizons, horizons[1:])):
+            raise ValueError(
+                f"horizons {list(horizons)} must start at 1 and be strictly increasing."
+            )
+        if horizons[-1] > self.forward:
+            raise ValueError(
+                f"horizons {list(horizons)} exceed the {self.forward} forward "
+                f"returns that score them."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def swap_cells_hold_the_window(self) -> "ExperimentConfig":
+        """A swap cell stretches the window's rows to ``num_scen`` and never drops one.
+
+        The rebalancing window spans ``look_back_days`` calendar days, which
+        bound its trading rows from above.
+        """
+        windows = {
+            "look_back": (self.arms, self.look_back),
+            "rebalancing.look_back_days": (
+                self.rebalancing.arms,
+                self.rebalancing.look_back_days,
+            ),
+        }
+        for key, (arms, rows) in windows.items():
+            if any(arm in SWAP_DONORS for arm in arms) and self.num_scen < rows:
+                raise ValueError(
+                    f"Swap cells stretch the window's rows to num_scen, so "
+                    f"num_scen {self.num_scen} must be at least {key} {rows}."
+                )
+        return self
 
     @property
     def report_dir(self) -> Path:

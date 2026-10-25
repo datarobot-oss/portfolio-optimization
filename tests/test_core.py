@@ -24,7 +24,9 @@ from portfolio_optimization.cvar_utils import (
     _select_efficient_frontier_key_portfolios,
     compute_CVaR,
     create_efficient_frontier,
+    expected_returns,
     generate_cvar_data,
+    generate_horizon_samples_jointfm,
     generate_samples_jointfm,
     normalize_portfolio_weights_to_one,
 )
@@ -495,6 +497,23 @@ class TestJointFMSimulator:
         # The default takes expected returns from the scenarios themselves.
         np.testing.assert_allclose(cd.mean, cd.R.mean(axis=1))
 
+    def test_historical_expected_returns_keep_the_scenarios(
+        self, returns_dict, fake_jointfm
+    ):
+        historical = generate_cvar_data(
+            dict(returns_dict),
+            self._settings(
+                jointfm_settings=JointFMSettings(expected_return="historical")
+            ),
+        )["cvar_data"]
+        scenario = generate_cvar_data(dict(returns_dict), self._settings())["cvar_data"]
+        np.testing.assert_array_equal(historical.R, scenario.R)
+        np.testing.assert_array_equal(historical.mean, returns_dict["mean"])
+        np.testing.assert_array_equal(
+            expected_returns(returns_dict, self._settings(), scenario.R.T),
+            scenario.mean,
+        )
+
     def test_one_joint_next_step_request(self, returns_dict, fake_jointfm):
         generate_cvar_data(returns_dict, self._settings())
         (call,) = fake_jointfm.forecast_calls
@@ -553,6 +572,46 @@ class TestJointFMSimulator:
         )
         np.testing.assert_allclose(samples, expected)
         assert samples.flags.writeable
+
+    @pytest.mark.parametrize("return_type", ["LOG", "LINEAR"])
+    def test_horizon_samples_are_returns_over_each_horizon(
+        self, returns_dict, fake_jointfm, return_type
+    ):
+        """Each horizon's draw minus the last log price is its h-period return."""
+        samples = generate_horizon_samples_jointfm(
+            25,
+            returns_dict["returns"],
+            return_type,
+            1,
+            JointFMSettings(),
+            (1, 5, 21),
+            seed=3,
+        )
+        (call,) = fake_jointfm.forecast_calls
+        last = len(call["history"]) - 1
+        assert call["query_times"] == [last + 1, last + 5, last + 21]
+        log_returns = call["samples"] - call["history"].iloc[-1].to_numpy()
+        expected = log_returns if return_type == "LOG" else np.expm1(log_returns)
+        assert samples.shape == (25, 3, len(TICKERS))
+        np.testing.assert_allclose(samples, expected)
+
+    def test_horizon_beyond_n_output_is_refused(self, returns_dict, fake_jointfm):
+        """A horizon past the served model's n_output is refused before sending."""
+        fake_jointfm.envelope.n_output = 20
+        with pytest.raises(ValueError, match="n_output=20"):
+            generate_horizon_samples_jointfm(
+                25, returns_dict["returns"], "LOG", 1, JointFMSettings(), (1, 21)
+            )
+        assert fake_jointfm.forecast_calls == []
+
+    @pytest.mark.parametrize("horizons", [(), (0, 1), (5, 5), (5, 1)])
+    def test_invalid_horizons_are_refused(self, returns_dict, fake_jointfm, horizons):
+        """Empty, non-positive, or non-increasing horizons never reach the client."""
+        with pytest.raises(ValueError, match="strictly increasing"):
+            generate_horizon_samples_jointfm(
+                25, returns_dict["returns"], "LOG", 1, JointFMSettings(), horizons
+            )
+        assert fake_jointfm.from_env_kwargs is None
 
     def test_scenarios_never_imply_non_positive_prices(
         self, returns_dict, fake_jointfm

@@ -211,12 +211,13 @@ returns_dict = cvar_utils.generate_cvar_data(returns_dict, scenario_generation_s
 - **History.** A log-price path longer than the served model's `n_input` points is cut to its most recent `n_input` points.
 - **Scenario count.** The SDK splits a large `num_scen` across requests and pooled instances, so it is not limited by one instance's capacity.
 - **Expected return.** By default the optimizer's expected returns are the mean of the JointFM scenarios, so expected return and CVaR come from the same forecast. `JointFMSettings(expected_return="historical")` uses the look-back window's mean instead, as the other fit types do.
+- **Longer horizons.** `cvar_utils.generate_horizon_samples_jointfm` forecasts the returns over several horizons, each a number of periods after the last observation up to the served model's `n_output`, in one request, from the same log-price path. The service draws each horizon independently, so the scenarios at two horizons are not paths.
 
 See [`notebooks/cvar_jointfm.ipynb`](notebooks/cvar_jointfm.ipynb) for a complete example.
 
 ### Experiments
 
-[`experiments/`](experiments/) holds experiments that measure the library's components; they are not part of the installed package. [`experiments/simulator_comparison/`](experiments/simulator_comparison/README.md) runs every scenario simulator on the same random asset universes and forecast dates. It scores how realistic each simulator's scenarios are against the realized next-day returns, and times scenario generation on CPU and on GPU.
+[`experiments/`](experiments/) holds experiments that measure the library's components; they are not part of the installed package. [`experiments/simulator_comparison/`](experiments/simulator_comparison/README.md) runs every scenario simulator on the same random asset universes and forecast dates. It scores how realistic each simulator's scenarios are against the realized returns over the next day and over longer horizons, and times scenario generation on CPU and on GPU.
 
 A YAML file under [`experiments/simulator_comparison/configs/`](experiments/simulator_comparison/configs/) describes each experiment completely, validated by a pydantic model. The [`Taskfile.yml`](Taskfile.yml) at the repository root runs and evaluates experiments with [Task](https://taskfile.dev/installation/), so its commands only name the config. `task --list` shows every task.
 

@@ -11,11 +11,15 @@ trials: 3
 origins: 4
 assets: 100
 look_back: 252
+origin_history: 252
 forward: 63
 num_scen: 10000
 seed: 0
 # The report compares every arm with no_fit-cpu; jointfm runs once per service.
 arms: [no_fit-cpu, jointfm]
+portfolio_sizes: [1, 2, 5, 10, 25, 50, 100]
+# Only the next day, so the timing measures one next-day request.
+horizons: [1]
 # Required by the schema; experiments:timing runs no rebalancing.
 rebalancing:
   output: results/simulator_comparison/timing_rebalancing.parquet

@@ -7,21 +7,36 @@ A trial is the unit of replication: its arms saw the same assets, windows, and
 seeds, so every comparison pairs arms within a trial, and confidence intervals
 resample trials. Trials share assets and dates, so the intervals measure
 sensitivity to the universe and the period, not sampling error of a population.
+Every statistic reads one horizon's rows; the report computes it per horizon
+and stacks the results (``stack_horizons``).
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
 from scipy.stats import wilcoxon
 
-from .scores import PIT_BINS, ScenarioScores
+from .arms import HISTORICAL_MEAN_ARM
+from .scores import (
+    PIT_BINS,
+    PORTFOLIO_CRPS,
+    PORTFOLIO_READINGS,
+    ScenarioScores,
+    cell_column,
+    recorded_cells,
+)
 
 REFERENCE_ARM = "no_fit-cpu"
-HEADLINE_SCORE = "energy_score"
-SKILL_SCORES = ("energy_score", "crps")
+# Proper scores the arms are ranked by, each on its own: the energy score of
+# the asset vector, which barely reacts to wrong correlations, and two that do.
+RANKING_SCORES = ("energy_score", "variogram_score", PORTFOLIO_CRPS)
+SKILL_SCORES = (*RANKING_SCORES, "crps")
 PIT_COLUMNS = tuple(c for c in ScenarioScores.columns if c.startswith("pit_bin_"))
-COMPARED_SCORES = tuple(c for c in ScenarioScores.columns if c not in PIT_COLUMNS)
+COMPARED_SCORES = (
+    *(c for c in ScenarioScores.columns if c not in PIT_COLUMNS),
+    PORTFOLIO_CRPS,
+)
 # Aggregated over a trial's origins by the median instead of the mean.
 MEDIAN_SCORES = ("spread",)
 RELIABILITY_LEVELS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
@@ -33,9 +48,9 @@ MIN_TRIALS = 2
 
 
 def complete_trials(
-    frame: pd.DataFrame, arms: tuple[str, ...], n_origins: int
+    frame: pd.DataFrame, arms: tuple[str, ...], n_origins: int, n_horizons: int
 ) -> tuple[pd.DataFrame, list[int]]:
-    """Keep the trials in which every arm has every origin.
+    """Keep the trials in which every arm has every origin at every horizon.
 
     Returns
     -------
@@ -48,7 +63,7 @@ def complete_trials(
         If fewer than ``MIN_TRIALS`` trials are complete.
     """
     counts = frame.groupby("trial").size()
-    complete = counts.index[counts == len(arms) * n_origins]
+    complete = counts.index[counts == len(arms) * n_origins * n_horizons]
     excluded = sorted(int(t) for t in counts.index.difference(complete))
     if len(complete) < MIN_TRIALS:
         raise ValueError(
@@ -63,15 +78,39 @@ def complete_trials(
 def aggregate(frame: pd.DataFrame) -> pd.DataFrame:
     """One row per (trial, arm): scores over the trial's origins, and timing.
 
-    ``seconds`` is the mean over the trial's non-warm-up calls; it is NaN for
-    a (trial, arm) whose only calls were warm-ups.
+    Every score, PIT bin, and portfolio-cell reading is the mean over the
+    trial's origins, except ``MEDIAN_SCORES``. ``origins`` counts the origins
+    aggregated. ``seconds`` is the mean over the trial's non-warm-up calls; it
+    is NaN for a (trial, arm) whose only calls were warm-ups.
+
+    Raises
+    ------
+    ValueError
+        If ``frame`` holds rows of more than one horizon, whose scores would
+        mix in one mean.
     """
+    horizons = sorted(frame["horizon"].unique())
+    if len(horizons) != 1:
+        raise ValueError(f"aggregate reads one horizon's rows; got {horizons}.")
+    cell_columns = [
+        cell_column(kind, size, reading)
+        for kind, size in recorded_cells(frame.columns)
+        for reading in PORTFOLIO_READINGS
+    ]
     grouped = frame.groupby(["trial", "arm"])
-    means = grouped[[*COMPARED_SCORES, *PIT_COLUMNS]].mean()
+    means = grouped[[*COMPARED_SCORES, *PIT_COLUMNS, *cell_columns]].mean()
     for column in MEDIAN_SCORES:
         means[column] = grouped[column].median()
     timed = frame[~frame["warmup"]].groupby(["trial", "arm"])["seconds"].mean()
-    means["seconds"] = timed.reindex(means.index)
+    # One concat instead of column inserts, which fragment a frame this wide.
+    means = pd.concat(
+        [
+            means,
+            grouped.size().rename("origins"),
+            timed.reindex(means.index).rename("seconds"),
+        ],
+        axis=1,
+    )
     arms = frame.groupby("arm")[["fit_type", "device"]].first()
     return means.join(arms, on="arm")
 
@@ -199,14 +238,28 @@ def skill_summary(skills: pd.DataFrame) -> pd.DataFrame:
 
 
 def ranking(per_trial: pd.DataFrame) -> pd.DataFrame:
-    """Per arm: mean rank by ``HEADLINE_SCORE`` (1 is best) and share of trials won.
+    """Per score of ``RANKING_SCORES`` and arm: mean rank and share of trials won.
 
-    Tied arms share the better rank, and each counts the trial as won.
+    Each score ranks the arms on its own (1 is best), and the rankings are
+    never merged, since any weights between them would be arbitrary. Tied arms
+    share the better rank, and each counts the trial as won.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns ``score``, ``arm``, ``mean_rank``, ``share_won``; per score
+        in ``RANKING_SCORES`` order, best mean rank first.
     """
-    ranks = _wide(per_trial, HEADLINE_SCORE).rank(axis=1, method="min")
-    return pd.DataFrame(
-        {"mean_rank": ranks.mean(), "share_won": (ranks == 1).mean()}
-    ).sort_values("mean_rank")
+    tables = []
+    for score in RANKING_SCORES:
+        ranks = _wide(per_trial, score).rank(axis=1, method="min")
+        table = pd.DataFrame(
+            {"mean_rank": ranks.mean(), "share_won": (ranks == 1).mean()}
+        ).sort_values("mean_rank")
+        tables.append(table.rename_axis("arm").reset_index().assign(score=score))
+    return pd.concat(tables, ignore_index=True)[
+        ["score", "arm", "mean_rank", "share_won"]
+    ]
 
 
 def timing(per_trial: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -301,3 +354,190 @@ def summary(per_trial: pd.DataFrame) -> pd.DataFrame:
                 }
             )
     return pd.DataFrame(rows)
+
+
+def swap_design(described_arms: Mapping[str, dict]) -> dict[str, str] | None:
+    """The arm of every cell of the dependence swap design, or None without it.
+
+    ``described_arms`` is a results file's ``arms`` identity (``describe_arms``),
+    which names each swap cell's resolved donors, so the JointFM corner is the
+    JointFM arm the cells drew from. Cells are keyed by their marginal source,
+    then their dependence source: ``J`` JointFM, ``W`` the window.
+
+    Returns
+    -------
+    dict or None
+        ``JJ``, ``JW``, ``WJ``, ``WW``, and ``window`` (``REFERENCE_ARM``) to arm
+        names when all three swap cells are among ``described_arms``; None
+        when none is.
+
+    Raises
+    ------
+    ValueError
+        If only some of the swap cells are present, or a donor is not, which
+        leaves the design incomplete.
+    """
+    cells = {
+        "JW": "swap-jointfm-window",
+        "WJ": "swap-window-jointfm",
+        "WW": "swap-window-window",
+    }
+    present = [name for name in cells.values() if name in described_arms]
+    if not present:
+        return None
+    if len(present) != len(cells):
+        raise ValueError(
+            f"The swap design needs all of {list(cells.values())}; the results "
+            f"hold {present}."
+        )
+    jointfm = described_arms[cells["JW"]]["marginals"]
+    missing = [arm for arm in (jointfm, REFERENCE_ARM) if arm not in described_arms]
+    if missing:
+        raise ValueError(f"The swap design needs its donors {missing} as well.")
+    return {"JJ": jointfm, **cells, "window": REFERENCE_ARM}
+
+
+def swap_effects(
+    per_trial: pd.DataFrame, columns: Sequence[str], design: Mapping[str, str]
+) -> pd.DataFrame:
+    """Main effects and interaction of the dependence swap design per reading.
+
+    Per trial and reading, with cells named marginal source first:
+
+    - ``marginals``: ((JJ - WJ) + (JW - WW)) / 2, JointFM's marginals against
+      the window's, averaged over both dependence sources;
+    - ``dependence``: ((JJ - JW) + (WJ - WW)) / 2, JointFM's dependence
+      against the window's, averaged over both marginal sources;
+    - ``interaction``: (JJ - WJ) - (JW - WW), how much JointFM's marginals
+      change the reading more under JointFM's dependence than the window's;
+    - ``construction``: WW - window, what stretching and tie-breaking alone
+      change, zero within noise when the swap adds nothing of its own.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per reading and effect: median over trials, its bootstrap
+        interval, the Wilcoxon p-value, and the trial count.
+    """
+    rows = []
+    for column in columns:
+        wide = _wide(per_trial, column)[list(design.values())].dropna()
+        cell = {key: wide[arm].to_numpy() for key, arm in design.items()}
+        effects = {
+            "marginals": (cell["JJ"] - cell["WJ"] + cell["JW"] - cell["WW"]) / 2,
+            "dependence": (cell["JJ"] - cell["JW"] + cell["WJ"] - cell["WW"]) / 2,
+            "interaction": cell["JJ"] - cell["WJ"] - cell["JW"] + cell["WW"],
+            "construction": cell["WW"] - cell["window"],
+        }
+        for effect, values in effects.items():
+            low, high = bootstrap_interval(
+                values, np.median, np.random.default_rng(BOOTSTRAP_SEED)
+            )
+            rows.append(
+                {
+                    "metric": column,
+                    "effect": effect,
+                    "median": float(np.median(values)),
+                    "ci_low": low,
+                    "ci_high": high,
+                    "p_value": _wilcoxon_p_value(values),
+                    "trials": len(values),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def mean_attribution_design(
+    described_arms: Mapping[str, dict],
+) -> dict[str, str] | None:
+    """The arms of the expected-return attribution, or None without it.
+
+    ``described_arms`` is a results file's ``arms`` identity (``describe_arms``),
+    which names the JointFM arm the historical-mean arm drew its scenarios from.
+
+    Returns
+    -------
+    dict or None
+        ``jointfm``, ``historical``, and ``window`` (``REFERENCE_ARM``) to arm
+        names when ``HISTORICAL_MEAN_ARM`` is among ``described_arms``; None
+        when it is not.
+
+    Raises
+    ------
+    ValueError
+        If the historical-mean arm's JointFM donor or the reference arm is
+        missing, which leaves the split incomplete.
+    """
+    if HISTORICAL_MEAN_ARM not in described_arms:
+        return None
+    jointfm = described_arms[HISTORICAL_MEAN_ARM]["scenarios"]
+    missing = [arm for arm in (jointfm, REFERENCE_ARM) if arm not in described_arms]
+    if missing:
+        raise ValueError(
+            f"The expected-return attribution needs {missing} next to "
+            f"{HISTORICAL_MEAN_ARM}."
+        )
+    return {
+        "jointfm": jointfm,
+        "historical": HISTORICAL_MEAN_ARM,
+        "window": REFERENCE_ARM,
+    }
+
+
+def mean_attribution(
+    per_trial: pd.DataFrame, columns: Sequence[str], design: Mapping[str, str]
+) -> pd.DataFrame:
+    """Split each reading's JointFM-minus-window difference into its two causes.
+
+    Per trial and reading, with ``design`` from ``mean_attribution_design``:
+
+    - ``total``: jointfm - window, the difference the comparisons table reads;
+    - ``expected_returns``: jointfm - historical, the same scenarios on
+      JointFM's expected returns instead of the window's mean;
+    - ``scenarios``: historical - window, JointFM's scenarios instead of the
+      window's on the same expected returns.
+
+    The two parts add up to the total in every trial. Each is summarized by
+    its mean over trials, not the median of the comparisons table, because
+    means add up too: the two parts' means sum to the total's.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per reading and part: mean over trials, its bootstrap
+        interval, the Wilcoxon p-value, and the trial count.
+    """
+    rows = []
+    for column in columns:
+        wide = _wide(per_trial, column)[list(design.values())].dropna()
+        arm = {key: wide[name].to_numpy() for key, name in design.items()}
+        parts = {
+            "total": arm["jointfm"] - arm["window"],
+            "expected_returns": arm["jointfm"] - arm["historical"],
+            "scenarios": arm["historical"] - arm["window"],
+        }
+        for part, values in parts.items():
+            low, high = bootstrap_interval(
+                values, np.mean, np.random.default_rng(BOOTSTRAP_SEED)
+            )
+            rows.append(
+                {
+                    "metric": column,
+                    "part": part,
+                    "mean": float(values.mean()),
+                    "ci_low": low,
+                    "ci_high": high,
+                    "p_value": _wilcoxon_p_value(values),
+                    "trials": len(values),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def stack_horizons(tables: Mapping[int, pd.DataFrame]) -> pd.DataFrame:
+    """One table of per-horizon tables, with a leading ``horizon`` column."""
+    stacked = pd.concat(
+        [table.assign(horizon=horizon) for horizon, table in tables.items()],
+        ignore_index=True,
+    )
+    return stacked[["horizon", *(c for c in stacked.columns if c != "horizon")]]

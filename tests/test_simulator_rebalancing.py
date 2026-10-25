@@ -82,10 +82,13 @@ def _config(tmp_path, prices_path, **rebalancing):
         origins=2,
         assets=3,
         look_back=64,
+        origin_history=64,
         forward=8,
         num_scen=50,
         seed=5,
         arms=("no_fit-cpu",),
+        portfolio_sizes=(1, 3),
+        horizons=(1,),
         rebalancing=values,
     )
 
@@ -119,6 +122,13 @@ def test_runs_every_arm_on_identical_trials(tmp_path, prices_path, fake_jointfm)
         assert compounded == pytest.approx(row.total_return)
         assert row.mean_step_return == pytest.approx(np.mean(row.step_returns))
     assert np.isfinite(frame[list(METRICS)].to_numpy(dtype=float)).all()
+    # One record per optimization, and the decisions hold every trading day once.
+    for row in frame.itertuples():
+        assert len(row.chosen_dates) == steps
+        assert row.chosen_dates[0] == row.trading_start.strftime("%Y-%m-%d")
+        assert sum(row.chosen_days) == TRADING_DAYS
+        assert all(len(values) == steps for values in (row.chosen_var, row.chosen_z2))
+        assert (np.asarray(row.chosen_cvar) >= np.asarray(row.chosen_var)).all()
     # Every JointFM request carries the trial's rebalancing seed.
     jointfm_seeds = {call["seed"] for call in fake_jointfm.forecast_calls}
     assert len(jointfm_seeds) == 2
@@ -135,6 +145,9 @@ def test_runs_every_arm_on_identical_trials(tmp_path, prices_path, fake_jointfm)
         assert {f"{plot}.png", f"{plot}.svg"} <= names
     comparisons = pd.read_csv(tmp_path / "report" / "rebalancing_comparisons.csv")
     assert set(comparisons["reference"]) == {"no_fit-cpu"}
+    chosen = pd.read_csv(tmp_path / "report" / "rebalancing_chosen_risk.csv")
+    assert set(chosen["arm"]) == set(frame["arm"])
+    assert (chosen["days"] == 2 * TRADING_DAYS).all()
 
 
 def test_other_rebalancing_settings_are_refused(tmp_path, prices_path, fake_jointfm):
@@ -264,7 +277,7 @@ def test_rebalancing_trials_are_independent_of_scenario_trials(
         seed=config.seed,
         n_assets=config.assets,
         n_origins=config.origins,
-        look_back=config.look_back,
+        origin_history=config.origin_history,
         forward=config.forward,
     )
     first = frame.loc[frame["trial"] == 0, "assets_hash"].item()

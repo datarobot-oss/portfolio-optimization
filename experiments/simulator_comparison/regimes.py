@@ -38,6 +38,7 @@ from .analysis import (
     skill_summary,
     summary,
 )
+from .portfolio_analysis import size_curves
 from .scores import TRAILING_STD_WINDOW, pairwise_correlations
 from .trials import OriginInputs, draw_trial, origin_inputs
 
@@ -45,7 +46,7 @@ FEATURES = ("window_correlation", "volatility_ratio", "correlation_change")
 REGIMES = ("low", "middle", "high")
 # Feature and regime of the readings over all origins.
 OVERALL = "all"
-READINGS = ("summary", "comparisons", "skill", "ranking")
+READINGS = ("summary", "comparisons", "skill", "ranking", "portfolio_sizes")
 
 
 def check_prices(prices_path: Path, identity: dict) -> None:
@@ -94,7 +95,8 @@ def origin_features(
     frame : pd.DataFrame
         Results rows; only ``trial`` and ``origin`` are read.
     experiment : dict
-        ``seed``, ``assets``, ``origins``, ``look_back``, and ``forward`` of the run.
+        ``seed``, ``assets``, ``origins``, ``look_back``, ``origin_history``,
+        and ``forward`` of the run.
 
     Returns
     -------
@@ -107,7 +109,6 @@ def origin_features(
         If an origin of ``frame`` is not one its trial draws from ``prices``,
         which means the results came from other prices or parameters.
     """
-    windows = {"look_back": experiment["look_back"], "forward": experiment["forward"]}
     rows = []
     for index, dates in frame.groupby("trial")["origin"].unique().items():
         trial = draw_trial(
@@ -116,7 +117,8 @@ def origin_features(
             seed=experiment["seed"],
             n_assets=experiment["assets"],
             n_origins=experiment["origins"],
-            **windows,
+            origin_history=experiment["origin_history"],
+            forward=experiment["forward"],
         )
         positions = pd.Series(trial.origins, index=prices.index[list(trial.origins)])
         dates = pd.DatetimeIndex(dates).sort_values()
@@ -128,7 +130,12 @@ def origin_features(
             )
         for date in dates:
             inputs = origin_inputs(
-                prices, trial, int(positions[date]), seed=experiment["seed"], **windows
+                prices,
+                trial,
+                int(positions[date]),
+                seed=experiment["seed"],
+                look_back=experiment["look_back"],
+                forward=experiment["forward"],
             )
             rows.append({"trial": index, "origin": date, **_features(inputs)})
     return pd.DataFrame(rows).set_index(["trial", "origin"])
@@ -177,7 +184,8 @@ def _readings(per_trial: pd.DataFrame) -> dict[str, pd.DataFrame]:
         "summary": scores[scores["metric"] != "seconds"],
         "comparisons": comparisons(per_trial),
         "skill": skill_summary(skill(per_trial)),
-        "ranking": ranking(per_trial).rename_axis("arm").reset_index(),
+        "ranking": ranking(per_trial),
+        "portfolio_sizes": size_curves(per_trial),
     }
 
 
@@ -188,7 +196,7 @@ def regime_readings(
 
     For all origins and for each (feature, regime), the rows of those origins
     are aggregated per trial and read by ``summary`` (without timing),
-    ``comparisons``, ``skill_summary``, and ``ranking``. The readings over all
+    ``comparisons``, ``skill_summary``, ``ranking``, and ``size_curves``. The readings over all
     origins equal those of the report's overall tables.
 
     Returns

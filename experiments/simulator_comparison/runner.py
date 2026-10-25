@@ -4,12 +4,16 @@
 """Run every arm at every forecast origin of every trial and record the results.
 
 At each origin the arms run one after another on identical inputs, so a slow
-drift of the host (clock, thermals, other load) affects them alike. Each call
-of ``generate_cvar_data`` is timed with ``time.perf_counter``; for JointFM the
-time includes the client's health request and the HTTP round trip, which is
-what a portfolio user pays. The first call of each arm in a process pays for
+drift of the host (clock, thermals, other load) affects them alike. Each arm's
+scenarios at every configured horizon (``horizon_scenarios``) are generated in
+one call timed with ``time.perf_counter``; for JointFM the time includes the
+client's health request and the HTTP round trip, which is what a portfolio
+user pays, and with the next day as the only horizon the call is one
+``generate_cvar_data`` call. Every measurement also reads the arm's expected
+returns, the ``CvarData.mean`` its rebalancing runs optimize on. The first call of each arm in a process pays for
 imports, CUDA context and cuML start-up, or the first connection, and is
-flagged as warm-up so summaries can leave it out.
+flagged as warm-up so summaries can leave it out. Each call writes one row
+per horizon, all carrying the call's time.
 """
 
 import argparse
@@ -24,24 +28,32 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
 
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from portfolio_optimization.cvar_data import CvarData
-from portfolio_optimization.cvar_utils import generate_cvar_data
+from portfolio_optimization.cvar_utils import expected_returns
 from portfolio_optimization.gpu import apply_gpu_selection, visible_gpus
 
 from .arms import (
+    AnyArm,
     Arm,
+    IndependentArm,
+    SwapArm,
     check_same_checkpoint,
     describe_arms,
     resolve_arms,
     scenario_settings,
+    simulators,
     verify_jointfm_service,
 )
 from .config import ExperimentConfig, load_config
-from .scores import ScenarioScores
+from .horizons import horizon_scenarios
+from .independence import independent_scenarios
+from .scores import PortfolioScores, ScenarioScores
+from .swaps import swap_scenarios
 from .table import (
+    CALL_COLUMNS,
     KEY_COLUMNS,
     RunMetadata,
     merge_identity,
@@ -67,7 +79,12 @@ PROGRESS_INTERVAL_LOG = 60.0
 
 
 class Measurement(Protocol):
-    """A reading taken from one arm's scenarios at one origin.
+    """A reading taken from one arm's forecast at one origin and horizon.
+
+    The forecast is the arm's scenarios over the horizon, shape
+    ``(scenarios, assets)``, and its expected returns, the next-day
+    ``CvarData.mean`` of shape ``(assets,)`` that its rebalancing runs
+    optimize on (``OriginScenarios.expected_returns``).
 
     ``columns`` names the values it returns; the runner refuses a reading
     whose keys differ, so every row of a results file has the same columns.
@@ -79,7 +96,11 @@ class Measurement(Protocol):
     parameters: Mapping[str, object]
 
     def __call__(
-        self, inputs: OriginInputs, cvar_data: CvarData
+        self,
+        inputs: OriginInputs,
+        horizon: int,
+        samples: np.ndarray,
+        expected_returns: np.ndarray,
     ) -> Mapping[str, float]: ...
 
 
@@ -138,14 +159,16 @@ def _gpu() -> dict[str, str]:
     return {"name": name, "driver": driver, "uuid": uuid}
 
 
-def host_metadata(arms: Sequence[Arm]) -> dict:
+def host_metadata(arms: Sequence[AnyArm]) -> dict:
     """Host the timings were measured on; the GPU only when a GPU arm runs here.
 
     A JointFM GPU arm computes in its service, which reports its own device,
-    so only an in-process GPU arm (cuML KDE) requires a local GPU.
+    so only an in-process GPU simulator (cuML KDE) requires a local GPU.
     """
     in_process_gpu = any(
-        arm.device == "GPU" and arm.fit_type != "jointfm" for arm in arms
+        simulator.device == "GPU" and simulator.fit_type != "jointfm"
+        for arm in arms
+        for simulator in simulators(arm)
     )
     return {
         "hostname": platform.node(),
@@ -158,7 +181,7 @@ def host_metadata(arms: Sequence[Arm]) -> dict:
 
 
 def package_versions(
-    arms: Sequence[Arm], extra_modules: Sequence[str] = ()
+    arms: Sequence[AnyArm], extra_modules: Sequence[str] = ()
 ) -> dict[str, str]:
     """Versions of the distributions behind the selected arms and ``extra_modules``.
 
@@ -171,7 +194,11 @@ def package_versions(
         If a module a selected arm needs is not installed.
     """
     modules = [*BASE_MODULES, *extra_modules]
-    if any(arm.fit_type == "kde" and arm.device == "GPU" for arm in arms):
+    if any(
+        simulator.fit_type == "kde" and simulator.device == "GPU"
+        for arm in arms
+        for simulator in simulators(arm)
+    ):
         modules.append("cuml")
     distributions = importlib.metadata.packages_distributions()
     missing = [module for module in modules if module not in distributions]
@@ -186,7 +213,7 @@ def package_versions(
 
 def run_identity(
     config: ExperimentConfig,
-    arms: Sequence[Arm],
+    arms: Sequence[AnyArm],
     prices: pd.DataFrame,
     measurements: Sequence[Measurement],
     services: dict[str, dict],
@@ -203,8 +230,10 @@ def run_identity(
             "origins": config.origins,
             "assets": config.assets,
             "look_back": config.look_back,
+            "origin_history": config.origin_history,
             "forward": config.forward,
             "num_scen": config.num_scen,
+            "horizons": list(config.horizons),
             "returns": RETURNS_SETTINGS.model_dump(mode="json"),
         },
         "arms": describe_arms(arms, num_scen=config.num_scen),
@@ -225,20 +254,96 @@ def _check_measurement_columns(measurements: Sequence[Measurement]) -> None:
         raise ValueError(f"Measurement columns {clashing} are not unique.")
 
 
+class OriginScenarios:
+    """Every simulator's scenarios at one origin, each generated at most once.
+
+    A derived arm reads its donors' scenarios here, so it adds no simulator
+    call when its donors run in the same session; a donor whose rows an earlier
+    session wrote is generated again, without a row, from the origin's seed.
+    A JointFM simulator first checks, outside the timed call, that ``.env``
+    still selects the service recorded for it in ``services``.
+    """
+
+    def __init__(
+        self,
+        inputs: OriginInputs,
+        config: ExperimentConfig,
+        services: Mapping[str, dict],
+    ):
+        self.inputs = inputs
+        self.config = config
+        self.services = services
+        self.scenarios: dict[str, Mapping[int, np.ndarray]] = {}
+
+    def generate(self, arm: Arm) -> tuple[Mapping[int, np.ndarray], float]:
+        """``arm``'s scenarios at every horizon and the seconds the call took.
+
+        Raises
+        ------
+        ValueError
+            If the JointFM service changed since the session started.
+        """
+        if arm.fit_type == "jointfm":
+            verify_jointfm_service(arm, self.services[arm.name])
+        start = time.perf_counter()
+        scenarios = horizon_scenarios(
+            arm,
+            self.inputs.returns_dict,
+            num_scen=self.config.num_scen,
+            seed=self.inputs.seed,
+            horizons=self.config.horizons,
+        )
+        seconds = time.perf_counter() - start
+        self.scenarios[arm.name] = scenarios
+        return scenarios, seconds
+
+    def of(self, arm: Arm) -> Mapping[int, np.ndarray]:
+        """``arm``'s scenarios, generated now unless an earlier call did."""
+        if arm.name not in self.scenarios:
+            self.generate(arm)
+        return self.scenarios[arm.name]
+
+    def expected_returns(self, arm: AnyArm) -> np.ndarray:
+        """``arm``'s ``CvarData.mean`` at this origin, as its rebalancing runs build it.
+
+        A simulator follows the library's rule (``expected_returns``) on its
+        next-day scenarios. A swap cell keeps its marginal donor's and the
+        independence control its window's, as their scenario generators do.
+        JointFM's scenario mean is read off the next day of its multi-horizon
+        request, whose draws differ from those of the next-day-only request a
+        rebalancing decision sends.
+        """
+        if isinstance(arm, SwapArm):
+            return self.expected_returns(arm.marginals)
+        if isinstance(arm, IndependentArm):
+            return self.expected_returns(arm.window)
+        settings = scenario_settings(
+            arm, num_scen=self.config.num_scen, seed=self.inputs.seed
+        )
+        return expected_returns(self.inputs.returns_dict, settings, self.of(arm)[1])
+
+
 def run_arm(
-    arm: Arm,
+    arm: AnyArm,
     trial: Trial,
     inputs: OriginInputs,
     config: ExperimentConfig,
     measurements: Sequence[Measurement],
-    services: Mapping[str, dict],
+    origin_scenarios: OriginScenarios,
     *,
     warmup: bool,
-) -> dict:
+) -> list[dict]:
     """Generate ``arm``'s scenarios at one origin, time the call, and measure them.
 
-    A JointFM arm first checks, outside the timed call, that ``.env`` still
-    selects the service recorded for it in ``services``.
+    A simulator's time is its one call; a swap cell's is its shuffle alone,
+    and the independence control's its permutation alone, after their donors'
+    scenarios are read from ``origin_scenarios``.
+
+    Returns
+    -------
+    list of dict
+        One row per horizon of ``config.horizons``, in that order; every row
+        carries the time of the one call that generated all horizons.
 
     Raises
     ------
@@ -246,41 +351,53 @@ def run_arm(
         If a measurement returns other keys than its ``columns``, or the
         JointFM service changed since the session started.
     """
-    if arm.fit_type == "jointfm":
-        verify_jointfm_service(arm, services[arm.name])
-    settings = scenario_settings(arm, num_scen=config.num_scen, seed=inputs.seed)
-    # generate_cvar_data adds cvar_data to the dict it gets; arms must not see
-    # another arm's result.
-    returns_dict = dict(inputs.returns_dict)
-    start = time.perf_counter()
-    cvar_data = generate_cvar_data(returns_dict, settings)["cvar_data"]
-    seconds = time.perf_counter() - start
-    row = {
-        "trial": trial.index,
-        "origin": inputs.origin,
-        "arm": arm.name,
-        "fit_type": arm.fit_type,
-        "device": arm.device,
-        "assets_hash": trial.assets_hash,
-        "seed": inputs.seed,
-        "num_scen": cvar_data.R.shape[1],
-        "seconds": seconds,
-        "warmup": warmup,
-    }
-    for measurement in measurements:
-        values = dict(measurement(inputs, cvar_data))
-        if set(values) != set(measurement.columns):
-            raise ValueError(
-                f"A measurement declared {measurement.columns} but returned "
-                f"{tuple(values)}."
-            )
-        row.update(values)
-    return row
+    if isinstance(arm, SwapArm):
+        marginals = origin_scenarios.of(arm.marginals)
+        dependence = origin_scenarios.of(arm.dependence)
+        start = time.perf_counter()
+        scenarios = swap_scenarios(
+            marginals, dependence, num_scen=config.num_scen, seed=inputs.seed
+        )
+        seconds = time.perf_counter() - start
+    elif isinstance(arm, IndependentArm):
+        window = origin_scenarios.of(arm.window)
+        start = time.perf_counter()
+        scenarios = independent_scenarios(window, seed=inputs.seed)
+        seconds = time.perf_counter() - start
+    else:
+        scenarios, seconds = origin_scenarios.generate(arm)
+    mean = origin_scenarios.expected_returns(arm)
+    rows = []
+    for horizon in config.horizons:
+        samples = scenarios[horizon]
+        row = {
+            "trial": trial.index,
+            "origin": inputs.origin,
+            "arm": arm.name,
+            "horizon": horizon,
+            "fit_type": arm.fit_type,
+            "device": arm.device,
+            "assets_hash": trial.assets_hash,
+            "seed": inputs.seed,
+            "num_scen": samples.shape[0],
+            "seconds": seconds,
+            "warmup": warmup,
+        }
+        for measurement in measurements:
+            values = dict(measurement(inputs, horizon, samples, mean))
+            if set(values) != set(measurement.columns):
+                raise ValueError(
+                    f"A measurement declared {measurement.columns} but returned "
+                    f"{tuple(values)}."
+                )
+            row.update(values)
+        rows.append(row)
+    return rows
 
 
 def pending_work(
-    prices: pd.DataFrame, config: ExperimentConfig, arms: Sequence[Arm], done: set
-) -> list[tuple[Trial, int, list[Arm]]]:
+    prices: pd.DataFrame, config: ExperimentConfig, arms: Sequence[AnyArm], done: set
+) -> list[tuple[Trial, int, list[AnyArm]]]:
     """Every (trial, origin) with arms not yet in the results, in run order.
 
     Trials are cheap seeded draws, so all are drawn up front and the progress
@@ -294,7 +411,7 @@ def pending_work(
             seed=config.seed,
             n_assets=config.assets,
             n_origins=config.origins,
-            look_back=config.look_back,
+            origin_history=config.origin_history,
             forward=config.forward,
         )
         for origin in trial.origins:
@@ -360,7 +477,7 @@ def run_experiment(
     done = (
         set()
         if frame is None
-        else set(frame[list(KEY_COLUMNS)].itertuples(index=False, name=None))
+        else set(frame[list(CALL_COLUMNS)].itertuples(index=False, name=None))
     )
     work = pending_work(prices, config, arms, done)
     warmed_up = set()
@@ -386,18 +503,20 @@ def run_experiment(
             forward=config.forward,
         )
         rows = []
+        seconds = {}
+        origin_scenarios = OriginScenarios(inputs, config, services)
         for arm in pending:
-            rows.append(
-                run_arm(
-                    arm,
-                    trial,
-                    inputs,
-                    config,
-                    measurements,
-                    services,
-                    warmup=arm.name not in warmed_up,
-                )
+            arm_rows = run_arm(
+                arm,
+                trial,
+                inputs,
+                config,
+                measurements,
+                origin_scenarios,
+                warmup=arm.name not in warmed_up,
             )
+            rows += arm_rows
+            seconds[arm.name] = arm_rows[0]["seconds"]
             warmed_up.add(arm.name)
         new = pd.DataFrame(rows)
         frame = new if frame is None else pd.concat([frame, new], ignore_index=True)
@@ -405,7 +524,7 @@ def run_experiment(
         added += len(rows)
         progress.set_postfix_str(
             f"trial {trial.index} "
-            + " ".join(f"{row['arm']}={row['seconds']:.3f}s" for row in rows),
+            + " ".join(f"{arm}={value:.3f}s" for arm, value in seconds.items()),
             refresh=False,
         )
     print(
@@ -440,7 +559,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     apply_gpu_selection()
     run_experiment(
         config,
-        measurements=(ScenarioScores(),),
+        measurements=(
+            ScenarioScores(),
+            PortfolioScores(
+                config.portfolio_sizes, config.rebalancing.cvar, config.assets
+            ),
+        ),
         command=sys.argv if argv is None else ["main", *argv],
     )
     return 0

@@ -5,6 +5,7 @@
 synthetic results table with planted answers."""
 
 import hashlib
+import itertools
 
 import numpy as np
 import pandas as pd
@@ -21,6 +22,12 @@ from experiments.simulator_comparison.analysis import (
     summary,
     timing,
 )
+from experiments.simulator_comparison.config import CvarConfig
+from experiments.simulator_comparison.portfolio_analysis import (
+    breach_band,
+    portfolio_pit,
+    size_curves,
+)
 from experiments.simulator_comparison.regimes import (
     FEATURES,
     OVERALL,
@@ -33,8 +40,11 @@ from experiments.simulator_comparison.regimes import (
 from experiments.simulator_comparison.report import write_report
 from experiments.simulator_comparison.scores import (
     PIT_BINS,
+    PORTFOLIO_CRPS,
     TRAILING_STD_WINDOW,
+    PortfolioScores,
     ScenarioScores,
+    cell_column,
 )
 from experiments.simulator_comparison.table import RunMetadata, write_results
 from experiments.simulator_comparison.trials import draw_trial
@@ -47,17 +57,39 @@ ARMS = {
 }
 TRIALS = 8
 ORIGINS = 3
+HORIZONS = (1, 5)
 EXPERIMENT = {
     "seed": 0,
     "origins": ORIGINS,
     "assets": 5,
     "look_back": 70,
+    "origin_history": 70,
     "forward": 10,
+    "horizons": list(HORIZONS),
 }
 PRICE_DAYS = 400
 PRICE_COLUMNS = 8
-# Planted: jointfm's energy score is this much below no_fit's in every trial.
+# Planted: jointfm's energy score is this much below no_fit's in every trial,
+# times the horizon.
 ENERGY_SHIFT = -0.5
+# Planted: jointfm's portfolios are half as wide as their outcomes, and its
+# portfolio CRPS is this share below no_fit's.
+JOINTFM_Z2 = 4.0
+JOINTFM_CRPS_SHARE = 0.8
+PORTFOLIOS = PortfolioScores(
+    (1, 2, 5),
+    CvarConfig(
+        w_min=-0.3,
+        w_max=0.8,
+        c_min=0.1,
+        c_max=0.2,
+        L_tar=1.6,
+        T_tar=0.5,
+        confidence=0.95,
+        risk_aversion=1.0,
+    ),
+    EXPERIMENT["assets"],
+)
 KDE_CPU_SECONDS = 0.08
 KDE_GPU_SECONDS = 0.02
 WARMUP_SECONDS = 100.0
@@ -87,26 +119,41 @@ def _origin_dates(prices, trial):
         seed=EXPERIMENT["seed"],
         n_assets=EXPERIMENT["assets"],
         n_origins=ORIGINS,
-        look_back=EXPERIMENT["look_back"],
+        origin_history=EXPERIMENT["origin_history"],
         forward=EXPERIMENT["forward"],
     )
     return drawn, prices.index[list(drawn.origins)]
 
 
-def _rows(prices):
+def _rows(prices, horizons):
+    """Planted results of every trial, origin, arm, and horizon of ``horizons``."""
     rng = np.random.default_rng(0)
     warmed = set()
     rows = []
     for trial in range(TRIALS):
         base = rng.normal(6.0, 0.3)
         for origin in _origin_dates(prices, trial)[1]:
-            for arm, (fit_type, device) in ARMS.items():
-                scores = {c: rng.uniform(0.0, 1.0) for c in ScenarioScores.columns}
+            for arm, horizon in itertools.product(ARMS, horizons):
+                fit_type, device = ARMS[arm]
+                scores = {
+                    c: rng.uniform(0.0, 1.0)
+                    for c in (*ScenarioScores.columns, *PORTFOLIOS.columns)
+                }
                 for column in PIT_COLUMNS:
                     scores[column] = 1 / PIT_BINS
+                for kind, size in PORTFOLIOS.cells:
+                    for column in PIT_COLUMNS:
+                        scores[cell_column(kind, size, column)] = 1 / PIT_BINS
+                    jointfm = arm == "jointfm-gpu"
+                    scores[cell_column(kind, size, "z2")] = (
+                        JOINTFM_Z2 if jointfm else 1.0
+                    )
+                    scores[cell_column(kind, size, "crps")] = (
+                        JOINTFM_CRPS_SHARE if jointfm else 1.0
+                    )
                 scores["energy_score"] = base + rng.normal(0.0, 0.01)
                 if arm == "jointfm-gpu":
-                    scores["energy_score"] += ENERGY_SHIFT
+                    scores["energy_score"] += ENERGY_SHIFT * horizon
                 seconds = {"kde-cpu": KDE_CPU_SECONDS, "kde-gpu": KDE_GPU_SECONDS}.get(
                     arm, 0.5
                 )
@@ -115,6 +162,7 @@ def _rows(prices):
                         "trial": trial,
                         "origin": origin,
                         "arm": arm,
+                        "horizon": horizon,
                         "fit_type": fit_type,
                         "device": device,
                         "assets_hash": f"h{trial}",
@@ -125,11 +173,13 @@ def _rows(prices):
                         **scores,
                     }
                 )
-                warmed.add(arm)
+                if horizon == horizons[-1]:
+                    warmed.add(arm)
     return pd.DataFrame(rows)
 
 
-def _identity(prices_path, measured=True):
+def _identity(prices_path, measured=2):
+    """Identity of the planted table; ``measured`` counts the recorded measurements."""
     return {
         "arms": {arm: {} for arm in ARMS},
         "prices": {
@@ -137,9 +187,10 @@ def _identity(prices_path, measured=True):
             "sha256": hashlib.sha256(prices_path.read_bytes()).hexdigest(),
         },
         "experiment": EXPERIMENT,
-        "measurements": [{"columns": list(ScenarioScores.columns), "parameters": {}}]
-        if measured
-        else [],
+        "measurements": [
+            {"columns": list(ScenarioScores.columns), "parameters": {}},
+            {"columns": list(PORTFOLIOS.columns), "parameters": {}},
+        ][:measured],
     }
 
 
@@ -157,12 +208,35 @@ def prices_path(tmp_path, prices):
 
 @pytest.fixture()
 def frame(prices):
-    return _rows(prices)
+    """Planted next-day rows, which every per-horizon statistic reads alike."""
+    return _rows(prices, (1,))
+
+
+@pytest.fixture()
+def results(prices):
+    """Planted rows of every horizon, as a results file holds them."""
+    return _rows(prices, HORIZONS)
+
+
+@pytest.fixture(scope="module")
+def report(tmp_path_factory):
+    """The report of the planted rows of every horizon, rendered once per module."""
+    directory = tmp_path_factory.mktemp("report")
+    prices_path = directory / "prices.csv"
+    prices = _prices()
+    prices.to_csv(prices_path)
+    path = directory / "results.parquet"
+    write_results(
+        path,
+        _rows(prices, HORIZONS),
+        RunMetadata(identity=_identity(prices_path), commands=[]),
+    )
+    return write_report(path, prices_path, directory / "report"), directory / "report"
 
 
 @pytest.fixture()
 def per_trial(frame):
-    complete, _ = complete_trials(frame, tuple(ARMS), ORIGINS)
+    complete, _ = complete_trials(frame, tuple(ARMS), ORIGINS, 1)
     return aggregate(complete)
 
 
@@ -180,7 +254,14 @@ class TestAnalysis:
         assert row["median_difference"] == pytest.approx(ENERGY_SHIFT, abs=0.02)
         assert row["ci_low"] <= row["median_difference"] <= row["ci_high"] < 0
         assert row["p_value"] < 0.05
-        assert ranking(per_trial).index[0] == "jointfm-gpu"
+        ranks = ranking(per_trial)
+        energy = ranks[ranks["score"] == "energy_score"]
+        assert energy["arm"].iloc[0] == "jointfm-gpu"
+        assert set(ranks["score"]) == {
+            "energy_score",
+            "variogram_score",
+            PORTFOLIO_CRPS,
+        }
 
     def test_gpu_is_compared_with_cpu_of_the_same_simulator(self, per_trial):
         table = comparisons(per_trial)
@@ -198,7 +279,7 @@ class TestAnalysis:
 
     def test_incomplete_trial_is_left_out(self, frame):
         incomplete = frame.drop(frame.index[-1])
-        kept, excluded = complete_trials(incomplete, tuple(ARMS), ORIGINS)
+        kept, excluded = complete_trials(incomplete, tuple(ARMS), ORIGINS, 1)
         assert excluded == [TRIALS - 1]
         assert set(kept["trial"]) == set(range(TRIALS - 1))
 
@@ -207,10 +288,46 @@ class TestAnalysis:
         for arm in ARMS:
             np.testing.assert_allclose(levels.loc[arm], RELIABILITY_LEVELS)
 
+    def test_planted_portfolio_readings_are_recovered(self, per_trial):
+        curves = size_curves(per_trial).set_index(["kind", "size", "arm", "reading"])
+        for kind, size in PORTFOLIOS.cells:
+            ratio = curves.loc[(kind, size, "jointfm-gpu", "spread_ratio")]
+            assert ratio["estimate"] == pytest.approx(1 / np.sqrt(JOINTFM_Z2))
+            assert ratio["target"] == 1.0
+            reference = curves.loc[(kind, size, "no_fit-cpu", "spread_ratio")]
+            assert reference["estimate"] == pytest.approx(1.0)
+            skill = curves.loc[(kind, size, "jointfm-gpu", "crps_skill")]
+            assert skill["estimate"] == pytest.approx(100 * (1 - JOINTFM_CRPS_SHARE))
+            breach = curves.loc[(kind, size, "kde-cpu", "breach_05")]
+            band = breach_band(0.05, TRIALS * ORIGINS)
+            assert (breach["band_low"], breach["band_high"]) == band
+        assert ("long_short", 5) in PORTFOLIOS.cells
+        assert ("long_short", 2) not in PORTFOLIOS.cells
+
+    def test_breach_band_holds_the_level_and_narrows_with_origins(self):
+        narrow, wide = breach_band(0.05, 4000), breach_band(0.05, 400)
+        assert wide[0] < narrow[0] < 0.05 < narrow[1] < wide[1]
+
+    def test_portfolio_pit_is_flat_where_planted_flat(self, per_trial):
+        pit = portfolio_pit(per_trial)
+        assert len(pit) == len(PORTFOLIOS.cells) * len(ARMS)
+        np.testing.assert_allclose(pit[list(PIT_COLUMNS)], 1 / PIT_BINS)
+
+    def test_rows_of_several_horizons_are_not_mixed(self, results):
+        """aggregate refuses rows whose horizons would mix in one mean."""
+        with pytest.raises(ValueError, match="one horizon"):
+            aggregate(results)
+
+    def test_trial_missing_a_horizon_is_incomplete(self, results):
+        """A trial is complete only with every origin at every horizon."""
+        incomplete = results.drop(results.index[-1])
+        _, excluded = complete_trials(incomplete, tuple(ARMS), ORIGINS, len(HORIZONS))
+        assert excluded == [TRIALS - 1]
+
     def test_missing_reference_is_refused(self, frame):
         without = frame[frame["arm"] != "no_fit-cpu"]
         complete, _ = complete_trials(
-            without, tuple(a for a in ARMS if a != "no_fit-cpu"), ORIGINS
+            without, tuple(a for a in ARMS if a != "no_fit-cpu"), ORIGINS, 1
         )
         with pytest.raises(ValueError, match="no_fit-cpu"):
             comparisons(aggregate(complete))
@@ -303,13 +420,9 @@ class TestRegimes:
 
 
 class TestReport:
-    def test_every_file_is_written(self, tmp_path, prices_path, frame):
-        results = tmp_path / "results.parquet"
-        write_results(
-            results, frame, RunMetadata(identity=_identity(prices_path), commands=[])
-        )
-        outputs = write_report(results, prices_path, tmp_path / "report")
-        names = {path.name for path in outputs.files}
+    def test_every_file_is_written(self, report):
+        outputs, directory = report
+        names = {written.name for written in outputs.files}
         plots = [
             "ranking",
             "scores",
@@ -318,6 +431,14 @@ class TestReport:
             "calibration_reliability",
             "timing",
             *(f"regimes_{feature}" for feature in FEATURES),
+            "portfolio_sizes",
+            "portfolio_pit_equal",
+            "portfolio_pit_long_only",
+            "portfolio_pit_long_short",
+            "horizons",
+            "portfolio_horizons_equal",
+            "portfolio_horizons_long_only",
+            "portfolio_horizons_long_short",
         ]
         for plot in plots:
             assert {f"{plot}.png", f"{plot}.svg"} <= names
@@ -329,33 +450,74 @@ class TestReport:
             "regime_comparisons",
             "regime_skill",
             "regime_ranking",
+            "regime_portfolio_sizes",
+            "portfolio_sizes",
+            "portfolio_pit",
         ]
         assert {f"{table}.csv" for table in tables} <= names
-        assert all(path.stat().st_size > 0 for path in outputs.files)
+        assert all(written.stat().st_size > 0 for written in outputs.files)
         assert outputs.excluded_trials == []
+        for table in set(tables) - {"origin_features", "regimes"}:
+            stacked = pd.read_csv(directory / f"{table}.csv")
+            assert sorted(stacked["horizon"].unique()) == list(HORIZONS), table
 
-    def test_results_without_scores_are_refused(self, tmp_path, prices_path, frame):
+    def test_planted_horizon_effect_is_recovered(self, report):
+        """Each horizon's readings come from that horizon's rows alone."""
+        _, directory = report
+        table = pd.read_csv(directory / "comparisons.csv")
+        energy = table[
+            (table["metric"] == "energy_score")
+            & (table["arm"] == "jointfm-gpu")
+            & (table["reference"] == "no_fit-cpu")
+        ].set_index("horizon")["median_difference"]
+        for horizon in HORIZONS:
+            assert energy[horizon] == pytest.approx(ENERGY_SHIFT * horizon, abs=0.02)
+        timing_table = pd.read_csv(directory / "timing.csv")
+        kde_gpu = timing_table.set_index("arm").loc["kde-gpu", "mean_seconds"]
+        assert kde_gpu == pytest.approx(KDE_GPU_SECONDS)
+
+    def test_results_without_horizons_are_refused(self, tmp_path, prices_path, frame):
+        """A results file recorded before horizons existed cannot be reported."""
+        path = tmp_path / "results.parquet"
+        identity = _identity(prices_path)
+        identity["experiment"] = {
+            k: v for k, v in EXPERIMENT.items() if k != "horizons"
+        }
+        write_results(path, frame, RunMetadata(identity=identity, commands=[]))
+        with pytest.raises(ValueError, match="no horizons"):
+            write_report(path, prices_path, tmp_path / "report")
+
+    @pytest.mark.parametrize(
+        "measured, missing", [(0, "ScenarioScores"), (1, "PortfolioScores")]
+    )
+    def test_results_without_scores_are_refused(
+        self, tmp_path, prices_path, frame, measured, missing
+    ):
         results = tmp_path / "results.parquet"
         write_results(
             results,
             frame,
-            RunMetadata(identity=_identity(prices_path, measured=False), commands=[]),
+            RunMetadata(
+                identity=_identity(prices_path, measured=measured), commands=[]
+            ),
         )
-        with pytest.raises(ValueError, match="ScenarioScores"):
+        with pytest.raises(ValueError, match=missing):
             write_report(results, prices_path, tmp_path / "report")
 
-    def test_unfinished_arm_can_be_left_out(self, tmp_path, prices_path, frame):
+    def test_unfinished_arm_can_be_left_out(self, tmp_path, prices_path, results):
         # One kde-gpu row in an extra trial: kde-gpu has not finished it.
-        late = frame[(frame["trial"] == 0) & (frame["arm"] == "kde-gpu")].iloc[:1]
-        results = tmp_path / "results.parquet"
-        unfinished = pd.concat([frame, late.assign(trial=TRIALS)], ignore_index=True)
+        late = results[(results["trial"] == 0) & (results["arm"] == "kde-gpu")]
+        path = tmp_path / "results.parquet"
+        unfinished = pd.concat(
+            [results, late.iloc[:1].assign(trial=TRIALS)], ignore_index=True
+        )
         write_results(
-            results,
+            path,
             unfinished,
             RunMetadata(identity=_identity(prices_path), commands=[]),
         )
         outputs = write_report(
-            results, prices_path, tmp_path / "report", exclude_arms=["kde-gpu"]
+            path, prices_path, tmp_path / "report", exclude_arms=["kde-gpu"]
         )
         assert outputs.excluded_trials == []
         ranking = pd.read_csv(tmp_path / "report" / "ranking.csv")
