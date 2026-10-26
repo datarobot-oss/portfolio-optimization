@@ -67,6 +67,14 @@ tasks:
       - '{{.LOCK_STATUS}}'
       - echo "lock:upgrade succeeded with --extra {{.CUDA_EXTRA}}"
 
+  pre-commit:
+    desc: >-
+      Run every pre-commit hook, the pytest suite included, on all files; a git
+      commit runs the same hooks on the files it stages once setup installed them
+    cmds:
+      - uv run --group dev pre-commit run --all-files
+      - echo "pre-commit succeeded"
+
   experiments:run:
     desc: >-
       Run the simulator comparison of CONFIG (default: full.yaml), resuming its
@@ -111,25 +119,39 @@ tasks:
         experiments.simulator_comparison.rebalancing_report --config {{.CONFIG}}
       - echo "experiments:rebalance-report succeeded for {{.CONFIG}}"
 
-  experiments:history:
+  experiments:blog:
     desc: >-
-      Paired change of every score from the results of BASELINE (default
-      full.yaml) to those of CONFIG (default full_long_history.yaml), two
-      configs that differ only in look_back, without running anything
+      Blog figures of the scenario and rebalancing results of CONFIG (default
+      full.yaml), written to <output stem>_blog beside them, without running
+      anything
     vars:
-      BASELINE: '{{.BASELINE | default (print .CONFIG_DIR "/full.yaml")}}'
-      CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/full_long_history.yaml")}}'
+      CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/full.yaml")}}'
     cmds:
       - >-
-        uv run --extra experiments python -m experiments.simulator_comparison.history
-        --baseline {{.BASELINE}} --config {{.CONFIG}}
-      - echo "experiments:history succeeded for {{.BASELINE}} against {{.CONFIG}}"
+        uv run --extra experiments python -m experiments.simulator_comparison.blog
+        --config {{.CONFIG}}
+      - echo "experiments:blog succeeded for {{.CONFIG}}"
+
+  experiments:paired:
+    desc: >-
+      Paired change of every reading from the RESULTS (scenario or
+      rebalancing) of BASELINE to those of CONFIG, two configs that differ
+      only in SETTING (look_back, horizons, risk_aversion, or checkpoint) and
+      their output files, written into CONFIG's report, without running anything
+    requires:
+      vars: [BASELINE, CONFIG, SETTING, RESULTS]
+    cmds:
+      - >-
+        uv run --extra experiments python -m experiments.simulator_comparison.paired
+        --baseline {{.BASELINE}} --config {{.CONFIG}} --setting {{.SETTING}}
+        --results {{.RESULTS}}
+      - echo "experiments:paired succeeded for {{.SETTING}} of {{.BASELINE}} against {{.CONFIG}}"
 
   experiments:all:
     desc: >-
       Run the scenario comparison of CONFIG (default full.yaml), its report,
-      and the rebalancing backtests with their report, resuming both results
-      files
+      the rebalancing backtests with their report, and the blog figures,
+      resuming both results files
     vars:
       CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/full.yaml")}}'
     cmds:
@@ -138,6 +160,8 @@ tasks:
       - task: experiments:report
         vars: {CONFIG: '{{.CONFIG}}'}
       - task: experiments:rebalance
+        vars: {CONFIG: '{{.CONFIG}}'}
+      - task: experiments:blog
         vars: {CONFIG: '{{.CONFIG}}'}
       - echo "experiments:all succeeded for {{.CONFIG}}"
 
@@ -181,69 +205,93 @@ tasks:
   experiments:suite:
     internal: true
     desc: >-
-      Every experiment of SET (pilot or full): experiments:all of SET.yaml, the
-      scenario comparisons and reports of its next-day and long-history twins
-      with their history comparison, and the rebalancing backtest of its
-      risk-averse twin, resuming every results file
+      The experiments of SET (pilot or full): experiments:all of SET.yaml, the
+      rebalancing backtest of its risk-averse twin, and the paired comparison
+      of the two backtests, resuming every results file
     requires:
       vars: [SET]
     cmds:
       - task: experiments:all
         vars: {CONFIG: '{{.CONFIG_DIR}}/{{.SET}}.yaml'}
-      - task: experiments:run
-        vars: {CONFIG: '{{.CONFIG_DIR}}/{{.SET}}_next_day.yaml'}
-      - task: experiments:report
-        vars: {CONFIG: '{{.CONFIG_DIR}}/{{.SET}}_next_day.yaml'}
-      - task: experiments:run
-        vars: {CONFIG: '{{.CONFIG_DIR}}/{{.SET}}_long_history.yaml'}
-      - task: experiments:report
-        vars: {CONFIG: '{{.CONFIG_DIR}}/{{.SET}}_long_history.yaml'}
-      - task: experiments:history
-        vars:
-          BASELINE: '{{.CONFIG_DIR}}/{{.SET}}.yaml'
-          CONFIG: '{{.CONFIG_DIR}}/{{.SET}}_long_history.yaml'
       - task: experiments:rebalance
         vars: {CONFIG: '{{.CONFIG_DIR}}/{{.SET}}_risk_averse.yaml'}
+      - task: experiments:paired
+        vars:
+          BASELINE: '{{.CONFIG_DIR}}/{{.SET}}.yaml'
+          CONFIG: '{{.CONFIG_DIR}}/{{.SET}}_risk_averse.yaml'
+          SETTING: risk_aversion
+          RESULTS: rebalancing
       - echo "experiments:suite succeeded for {{.SET}}"
 
-  experiments:suite-fresh:
+  experiments:pilot-twins:
     internal: true
     desc: >-
-      Delete every output of SET.yaml and its three twins, then run
-      experiments:suite of SET from scratch
+      The scenario comparisons and reports of the pilot's next-day and
+      long-history twins and the paired comparison of each against pilot.yaml,
+      resuming every results file
+    cmds:
+      - task: experiments:run
+        vars: {CONFIG: '{{.CONFIG_DIR}}/pilot_next_day.yaml'}
+      - task: experiments:report
+        vars: {CONFIG: '{{.CONFIG_DIR}}/pilot_next_day.yaml'}
+      - task: experiments:paired
+        vars:
+          BASELINE: '{{.CONFIG_DIR}}/pilot.yaml'
+          CONFIG: '{{.CONFIG_DIR}}/pilot_next_day.yaml'
+          SETTING: horizons
+          RESULTS: scenario
+      - task: experiments:run
+        vars: {CONFIG: '{{.CONFIG_DIR}}/pilot_long_history.yaml'}
+      - task: experiments:report
+        vars: {CONFIG: '{{.CONFIG_DIR}}/pilot_long_history.yaml'}
+      - task: experiments:paired
+        vars:
+          BASELINE: '{{.CONFIG_DIR}}/pilot.yaml'
+          CONFIG: '{{.CONFIG_DIR}}/pilot_long_history.yaml'
+          SETTING: look_back
+          RESULTS: scenario
+      - echo "experiments:pilot-twins succeeded"
+
+  experiments:clean-configs:
+    internal: true
+    desc: >-
+      Delete every output of the configs NAMES, each a file name in
+      CONFIG_DIR without .yaml
     requires:
-      vars: [SET]
+      vars: [NAMES]
     cmds:
       - >-
-        for name in {{.SET}} {{.SET}}_next_day {{.SET}}_long_history {{.SET}}_risk_averse; do
+        for name in {{.NAMES}}; do
         uv run --extra experiments python -m experiments.simulator_comparison.clean
         --config {{.CONFIG_DIR}}/$name.yaml || exit 1; done
-      - task: experiments:suite
-        vars: {SET: '{{.SET}}'}
-      - echo "experiments:suite-fresh succeeded for {{.SET}}"
+      - echo "experiments:clean-configs succeeded for {{.NAMES}}"
 
   experiments:pilot:
     desc: >-
       Every experiment at a small size (pilot.yaml and its next-day,
       long-history, and risk-averse twins), resuming every results file, to
-      measure cost per arm and noise before the full run
+      measure cost per arm and noise, and to recheck on a new checkpoint
+      whether its next day changes with the horizons queried and its
+      dependence with the history sent
     cmds:
       - task: experiments:suite
         vars: {SET: pilot}
+      - task: experiments:pilot-twins
       - echo "experiments:pilot succeeded"
 
   experiments:pilot-fresh:
     desc: >-
       Delete every output of experiments:pilot, then run it from scratch
     cmds:
-      - task: experiments:suite-fresh
-        vars: {SET: pilot}
+      - task: experiments:clean-configs
+        vars: {NAMES: pilot pilot_next_day pilot_long_history pilot_risk_averse}
+      - task: experiments:pilot
       - echo "experiments:pilot-fresh succeeded"
 
   experiments:full:
     desc: >-
-      Every experiment at full size (full.yaml and its next-day, long-history,
-      and risk-averse twins), resuming every results file
+      Every experiment at full size (full.yaml and its risk-averse twin),
+      resuming every results file
     cmds:
       - task: experiments:suite
         vars: {SET: full}
@@ -253,8 +301,9 @@ tasks:
     desc: >-
       Delete every output of experiments:full, then run it from scratch
     cmds:
-      - task: experiments:suite-fresh
-        vars: {SET: full}
+      - task: experiments:clean-configs
+        vars: {NAMES: full full_risk_averse}
+      - task: experiments:full
       - echo "experiments:full-fresh succeeded"
 
   data:risk-free-rates:
@@ -277,5 +326,5 @@ tasks:
         tests/test_simulator_rebalancing.py tests/test_simulator_clean.py
         tests/test_simulator_portfolios.py tests/test_simulator_horizons.py
         tests/test_simulator_swaps.py tests/test_simulator_chosen.py
-        tests/test_simulator_attribution.py tests/test_simulator_history.py -q
+        tests/test_simulator_attribution.py tests/test_simulator_paired.py -q
       - echo "experiments:test succeeded"

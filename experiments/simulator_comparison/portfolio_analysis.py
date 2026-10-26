@@ -23,7 +23,12 @@ from .analysis import (
     REFERENCE_ARM,
     bootstrap_interval,
 )
-from .scores import PORTFOLIO_VAR_LEVELS, cell_column, recorded_cells
+from .scores import (
+    PORTFOLIO_READINGS,
+    PORTFOLIO_VAR_LEVELS,
+    cell_column,
+    recorded_cells,
+)
 
 SPREAD_TARGET = 1.0
 CURVE_COLUMNS = [
@@ -147,6 +152,35 @@ def size_curves(per_trial: pd.DataFrame) -> pd.DataFrame:
                 )
             )
     return pd.DataFrame(rows, columns=CURVE_COLUMNS)
+
+
+def effect_curves(effects: pd.DataFrame) -> pd.DataFrame:
+    """The portfolio rows of ``swap_effects`` as curves over the portfolio size.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per (kind, size, effect, reading) of the cells' own readings,
+        such as ``breach_05``, with the effect's mean over trials as
+        ``estimate`` and its interval. The effect is named in ``arm``, where
+        ``plotting._curves`` reads the series.
+    """
+    names = {
+        cell_column(kind, size, reading): (kind, size, reading)
+        for kind, size in recorded_cells(effects["metric"].unique())
+        for reading in PORTFOLIO_READINGS
+    }
+    rows = effects[effects["metric"].isin(names)]
+    cells = pd.DataFrame(
+        rows["metric"].map(names).tolist(),
+        columns=["kind", "size", "reading"],
+        index=rows.index,
+    )
+    return cells.join(
+        rows[["effect", "mean", "ci_low", "ci_high"]].rename(
+            columns={"effect": "arm", "mean": "estimate"}
+        )
+    )
 
 
 def portfolio_pit(per_trial: pd.DataFrame) -> pd.DataFrame:

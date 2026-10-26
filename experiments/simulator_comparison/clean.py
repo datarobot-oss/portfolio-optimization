@@ -5,8 +5,9 @@
 
 The runners resume their results files, so a run after a change of code or
 library defaults would refuse the old file or add to it. This deletes the
-scenario results and report, and the rebalancing results, report, and
-per-trial universes the configuration names, and prints each path it removes.
+scenario results, report, and blog figures, and the rebalancing results,
+report, and per-trial universes the configuration names, and prints each path
+it removes.
 Run it as ``python -m experiments.simulator_comparison.clean``.
 """
 
@@ -24,7 +25,12 @@ def outputs(config: ExperimentConfig) -> tuple[tuple[Path, ...], tuple[Path, ...
     rebalancing = config.rebalancing
     return (
         (config.output, rebalancing.output),
-        (config.report_dir, rebalancing.report_dir, rebalancing.universe_dir),
+        (
+            config.report_dir,
+            config.blog_dir,
+            rebalancing.report_dir,
+            rebalancing.universe_dir,
+        ),
     )
 
 
@@ -57,8 +63,8 @@ def remove_outputs(config: ExperimentConfig) -> list[Path]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m experiments.simulator_comparison.clean",
-        description="Delete the results, reports, and universes a configuration "
-        "writes, so its next run starts fresh.",
+        description="Delete the results, reports, blog figures, and universes a "
+        "configuration writes, so its next run starts fresh.",
     )
     parser.add_argument(
         "--config", type=Path, required=True, help="YAML configuration file."

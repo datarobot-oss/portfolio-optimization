@@ -79,6 +79,31 @@ def write_results(path: Path, frame: pd.DataFrame, metadata: RunMetadata) -> Non
     os.replace(partial, path)
 
 
+def identity_differences(stored: dict, current: dict) -> dict[str, tuple]:
+    """Every entry in which two identities differ.
+
+    The per-arm entries in ``ACCUMULATING_KEYS`` are compared only for the
+    arms both identities hold, so either may hold arms the other lacks.
+
+    Returns
+    -------
+    dict
+        Entry name, ``<key>.<arm>`` for a per-arm entry, to its (stored,
+        current) values; empty when the identities agree.
+    """
+    fixed = (stored.keys() | current.keys()) - set(ACCUMULATING_KEYS)
+    differing = {
+        key: (stored.get(key), current.get(key))
+        for key in sorted(fixed)
+        if stored.get(key) != current.get(key)
+    }
+    for key in ACCUMULATING_KEYS:
+        for arm in sorted(stored[key].keys() & current[key].keys()):
+            if stored[key][arm] != current[key][arm]:
+                differing[f"{key}.{arm}"] = (stored[key][arm], current[key][arm])
+    return differing
+
+
 def merge_identity(path: Path, stored: dict, current: dict) -> dict:
     """Combine a file's identity with this session's, refusing other conditions.
 
@@ -95,18 +120,9 @@ def merge_identity(path: Path, stored: dict, current: dict) -> dict:
     Raises
     ------
     ValueError
-        Naming every entry that differs.
+        Naming every entry that differs (``identity_differences``).
     """
-    fixed = (stored.keys() | current.keys()) - set(ACCUMULATING_KEYS)
-    differing = {
-        key: (stored.get(key), current.get(key))
-        for key in sorted(fixed)
-        if stored.get(key) != current.get(key)
-    }
-    for key in ACCUMULATING_KEYS:
-        for arm in sorted(stored[key].keys() & current[key].keys()):
-            if stored[key][arm] != current[key][arm]:
-                differing[f"{key}.{arm}"] = (stored[key][arm], current[key][arm])
+    differing = identity_differences(stored, current)
     if differing:
         details = "; ".join(
             f"{key}: stored {old!r}, now {new!r}"

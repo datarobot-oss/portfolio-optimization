@@ -6,7 +6,8 @@
 # and GPUs come from .env, as for any user of the library.
 #
 # Twin of pilot.yaml that differs only in look_back and its results files: both
-# draw the same forecast dates, so task experiments:history pairs them by trial.
+# draw the same forecast dates, so task experiments:paired (SETTING=look_back)
+# pairs them by trial.
 
 prices: data/stock_data/sp500.csv
 output: results/simulator_comparison/pilot_long_history.parquet
@@ -27,6 +28,7 @@ horizons: [1, 5, 21, 63]
 # Rebalancing backtest of the same trials' universes (task experiments:rebalance).
 rebalancing:
   output: results/simulator_comparison/pilot_long_history_rebalancing.parquet
+  scenario_results: results/simulator_comparison/pilot_long_history.parquet
   arms: [no_fit-cpu, gaussian-cpu, kde-gpu, jointfm, swap-jointfm-window, swap-window-jointfm, swap-window-window, jointfm-historical, window-independent]
   trials: 20
   trading_days: 378

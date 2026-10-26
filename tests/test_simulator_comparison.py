@@ -58,6 +58,7 @@ def _config(tmp_path, prices_path, **overrides):
         horizons=(1,),
         rebalancing=dict(
             output=tmp_path / "rebalancing.parquet",
+            scenario_results=tmp_path / "results.parquet",
             arms=("no_fit-cpu",),
             trials=2,
             trading_days=10,

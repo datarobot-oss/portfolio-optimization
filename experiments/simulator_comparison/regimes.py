@@ -24,6 +24,7 @@ intervals resample trials as everywhere in the report.
 """
 
 import hashlib
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -46,7 +47,6 @@ FEATURES = ("window_correlation", "volatility_ratio", "correlation_change")
 REGIMES = ("low", "middle", "high")
 # Feature and regime of the readings over all origins.
 OVERALL = "all"
-READINGS = ("summary", "comparisons", "skill", "ranking", "portfolio_sizes")
 
 
 def check_prices(prices_path: Path, identity: dict) -> None:
@@ -178,39 +178,56 @@ def terciles(features: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     return pd.DataFrame(labels, index=features.index), pd.DataFrame(rows)
 
 
-def _readings(per_trial: pd.DataFrame) -> dict[str, pd.DataFrame]:
+def _scores(per_trial: pd.DataFrame) -> pd.DataFrame:
     scores = summary(per_trial)
-    return {
-        "summary": scores[scores["metric"] != "seconds"],
-        "comparisons": comparisons(per_trial),
-        "skill": skill_summary(skill(per_trial)),
-        "ranking": ranking(per_trial),
-        "portfolio_sizes": size_curves(per_trial),
-    }
+    return scores[scores["metric"] != "seconds"]
+
+
+def _skill(per_trial: pd.DataFrame) -> pd.DataFrame:
+    return skill_summary(skill(per_trial))
+
+
+# How each reading repeated per regime is read off a cell's per-trial table.
+READINGS = {
+    "summary": _scores,
+    "comparisons": comparisons,
+    "skill": _skill,
+    "ranking": ranking,
+    "portfolio_sizes": size_curves,
+}
 
 
 def regime_readings(
-    frame: pd.DataFrame, regimes: pd.DataFrame
+    frame: pd.DataFrame,
+    regimes: pd.DataFrame,
+    readings: Sequence[str] = tuple(READINGS),
 ) -> dict[str, pd.DataFrame]:
     """The report's readings over all origins and in every regime.
 
     For all origins and for each (feature, regime), the rows of those origins
-    are aggregated per trial and read by ``summary`` (without timing),
-    ``comparisons``, ``skill_summary``, ``ranking``, and ``size_curves``. The readings over all
-    origins equal those of the report's overall tables.
+    are aggregated per trial and read by every reading of ``readings``:
+    ``summary`` (without timing), ``comparisons``, ``skill_summary``,
+    ``ranking``, and ``size_curves``. A caller that needs only some of them
+    names those, since the Wilcoxon tests of ``comparisons`` cost most of the
+    time. The readings over all origins equal those of the report's overall
+    tables.
 
     Returns
     -------
     dict
-        One table per name in ``READINGS``, each with leading ``feature`` and
+        One table per name in ``readings``, each with leading ``feature`` and
         ``regime`` columns; the readings over all origins carry ``OVERALL`` in both.
 
     Raises
     ------
     ValueError
-        If an origin of ``frame`` has no regime, or a regime holds fewer than
-        ``MIN_TRIALS`` trials.
+        If a name of ``readings`` is not in ``READINGS``, an origin of
+        ``frame`` has no regime, or a regime holds fewer than ``MIN_TRIALS``
+        trials.
     """
+    unknown = sorted(set(readings) - set(READINGS))
+    if unknown:
+        raise ValueError(f"Unknown regime readings {unknown}; known: {list(READINGS)}.")
     keys = pd.MultiIndex.from_frame(frame[["trial", "origin"]])
     cells = [(OVERALL, OVERALL, np.ones(len(frame), dtype=bool))]
     for feature in FEATURES:
@@ -218,7 +235,7 @@ def regime_readings(
         if of_row.isna().any():
             raise ValueError(f"Some origins have no {feature} regime.")
         cells += [(feature, name, (of_row == name).to_numpy()) for name in REGIMES]
-    tables = {name: [] for name in READINGS}
+    tables = {name: [] for name in readings}
     for feature, name, mask in cells:
         per_trial = aggregate(frame[mask])
         trials = per_trial.index.get_level_values("trial").nunique()
@@ -227,10 +244,10 @@ def regime_readings(
                 f"The {name} {feature} regime holds {trials} trials; its readings "
                 f"need at least {MIN_TRIALS}."
             )
-        for reading, table in _readings(per_trial).items():
+        for reading in readings:
             tables[reading].append(
-                table.assign(feature=feature, regime=name).set_index(
-                    ["feature", "regime"]
-                )
+                READINGS[reading](per_trial)
+                .assign(feature=feature, regime=name)
+                .set_index(["feature", "regime"])
             )
     return {name: pd.concat(parts).reset_index() for name, parts in tables.items()}

@@ -22,6 +22,11 @@ from experiments.simulator_comparison.analysis import (
     summary,
     timing,
 )
+from experiments.simulator_comparison.arms import (
+    DERIVED_DONORS,
+    INDEPENDENT_ARM,
+    SWAP_DONORS,
+)
 from experiments.simulator_comparison.config import CvarConfig
 from experiments.simulator_comparison.portfolio_analysis import (
     breach_band,
@@ -54,6 +59,24 @@ ARMS = {
     "kde-cpu": ("kde", "CPU"),
     "kde-gpu": ("kde", "GPU"),
     "jointfm-gpu": ("jointfm", "GPU"),
+}
+# The scenario comparison's measurement arms, with the identity entries that
+# name their donors among ``ARMS``.
+MEASUREMENT_ARMS = {
+    "swap-jointfm-window": {"marginals": "jointfm-gpu", "dependence": "no_fit-cpu"},
+    "swap-window-jointfm": {"marginals": "no_fit-cpu", "dependence": "jointfm-gpu"},
+    "swap-window-window": {"marginals": "no_fit-cpu", "dependence": "no_fit-cpu"},
+    INDEPENDENT_ARM: {"window": "no_fit-cpu"},
+}
+# The figures that read each measurement arm.
+READERS = {
+    **dict.fromkeys(
+        SWAP_DONORS, ("swap_effects_horizons", "swap_effects_portfolio_sizes")
+    ),
+    INDEPENDENT_ARM: (
+        "independence_control_horizons",
+        "independence_control_portfolio_sizes",
+    ),
 }
 TRIALS = 8
 ORIGINS = 3
@@ -125,16 +148,17 @@ def _origin_dates(prices, trial):
     return drawn, prices.index[list(drawn.origins)]
 
 
-def _rows(prices, horizons):
-    """Planted results of every trial, origin, arm, and horizon of ``horizons``."""
+def _rows(prices, horizons, arms=ARMS):
+    """Planted results of every trial, origin, arm of ``arms`` (name to fit
+    type and device), and horizon of ``horizons``."""
     rng = np.random.default_rng(0)
     warmed = set()
     rows = []
     for trial in range(TRIALS):
         base = rng.normal(6.0, 0.3)
         for origin in _origin_dates(prices, trial)[1]:
-            for arm, horizon in itertools.product(ARMS, horizons):
-                fit_type, device = ARMS[arm]
+            for arm, horizon in itertools.product(arms, horizons):
+                fit_type, device = arms[arm]
                 scores = {
                     c: rng.uniform(0.0, 1.0)
                     for c in (*ScenarioScores.columns, *PORTFOLIOS.columns)
@@ -262,6 +286,17 @@ class TestAnalysis:
             "variogram_score",
             PORTFOLIO_CRPS,
         }
+
+    def test_measurement_arms_are_not_ranked(self, per_trial):
+        """A measurement arm that beats every simulator takes no win from one."""
+        control = per_trial.xs("no_fit-cpu", level="arm", drop_level=False).rename(
+            index={"no_fit-cpu": INDEPENDENT_ARM}, level="arm"
+        )
+        control["energy_score"] = -1.0
+        ranks = ranking(pd.concat([per_trial, control]))
+        assert set(ranks["arm"]) == set(ARMS)
+        energy = ranks[ranks["score"] == "energy_score"].set_index("arm")
+        assert energy.loc["jointfm-gpu", "share_won"] == 1.0
 
     def test_gpu_is_compared_with_cpu_of_the_same_simulator(self, per_trial):
         table = comparisons(per_trial)
@@ -446,6 +481,8 @@ class TestReport:
         ]
         for plot in plots:
             assert {f"{plot}.png", f"{plot}.svg"} <= names
+        # Without the swap arms there are no effects to draw.
+        assert not any("swap_effects" in name for name in names)
         tables = [
             "summary",
             "origin_features",
@@ -537,3 +574,33 @@ class TestReport:
             write_report(
                 results, prices_path, tmp_path / "report", exclude_arms=["jointfm-cpu"]
             )
+
+
+def test_measurement_arms_are_drawn_only_by_their_readers(
+    tmp_path, prices, prices_path, saved_figures
+):
+    """Every per-arm figure names the simulators alone, and every measurement
+    arm's reader is drawn."""
+    arms = {**ARMS, **{arm: (arm, "CPU") for arm in MEASUREMENT_ARMS}}
+    identity = _identity(prices_path)
+    identity["arms"].update(MEASUREMENT_ARMS)
+    path = tmp_path / "results.parquet"
+    write_results(
+        path, _rows(prices, HORIZONS, arms), RunMetadata(identity=identity, commands=[])
+    )
+    write_report(path, prices_path, tmp_path / "report")
+
+    readers = {name for names in READERS.values() for name in names}
+    per_arm = set(saved_figures) - readers
+    assert {"ranking", "scores", "horizons", "portfolio_sizes"} <= per_arm
+    for name in per_arm:
+        assert "jointfm" in saved_figures[name], name
+        named = [arm for arm in DERIVED_DONORS if arm in saved_figures[name]]
+        assert named == [], name
+    for arm, names in READERS.items():
+        assert set(names) <= set(saved_figures), arm
+    for name in READERS[INDEPENDENT_ARM]:
+        assert INDEPENDENT_ARM in saved_figures[name]
+    control = pd.read_csv(tmp_path / "report" / "independence_control.csv")
+    assert set(control["horizon"]) == set(HORIZONS)
+    assert "portfolio_equal_5_breach_05" in set(control["metric"])

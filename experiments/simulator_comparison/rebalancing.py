@@ -343,7 +343,7 @@ def rebalancing_identity(
     identity["packages"] = package_versions(arms, extra)
     identity["host"] = host_metadata(arms)
     identity["rebalancing"] = config.rebalancing.model_dump(
-        mode="json", exclude={"output", "arms", "trials"}
+        mode="json", exclude={"output", "scenario_results", "arms", "trials"}
     )
     identity["risk_free_rates"] = {
         "file": config.rebalancing.risk_free_rates.name,
@@ -474,7 +474,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     from .rebalancing_report import write_rebalancing_report
 
     outputs = write_rebalancing_report(
-        config.rebalancing.output, config.rebalancing.report_dir
+        config.rebalancing.output,
+        config.rebalancing.scenario_results,
+        config.rebalancing.report_dir,
     )
     print(
         f"Rebalancing report finished: {len(outputs)} files in "

@@ -75,6 +75,16 @@ class RebalancingConfig(BaseModel):
         description="Results Parquet file of the rebalancing runs, resumed like the "
         "scenario results; its report goes to <output stem>_report beside it."
     )
+    scenario_results: Path = Field(
+        description="Scenario-comparison results file over whose next-day curves "
+        "of random long-only and long-short portfolios the report draws the risk "
+        "of the chosen portfolios: the config's own output, or, for a twin that "
+        "runs only the backtest, the output of the config it is twin to. It must "
+        "hold every backtested trial complete, on the same prices, universes, and "
+        "weight, cash, and leverage bounds, so the scenario comparison runs "
+        "before the report. Only the report reads it, so it is not part of the "
+        "rebalancing results' identity."
+    )
     arms: tuple[str, ...] = Field(
         min_length=1,
         description=f"Simulators to backtest, in this order: {', '.join(CONFIG_ARM_NAMES)}. "
@@ -197,7 +207,7 @@ class ExperimentConfig(BaseModel):
         description="Returns an origin needs before it to be drawn, at least "
         "look_back. Only the trial draw reads it, so configs that differ only in "
         "look_back draw the same origins and scenario seeds and their results "
-        "pair trial by trial (history_comparison).",
+        "pair trial by trial (paired.py, setting look_back).",
     )
     forward: int = Field(
         gt=1,
@@ -324,6 +334,11 @@ class ExperimentConfig(BaseModel):
     def report_dir(self) -> Path:
         """Where the report writes: ``<output stem>_report`` beside the results."""
         return self.output.with_name(f"{self.output.stem}_report")
+
+    @property
+    def blog_dir(self) -> Path:
+        """Where the blog figures go: ``<output stem>_blog`` beside the results."""
+        return self.output.with_name(f"{self.output.stem}_blog")
 
 
 def load_config(path: Path) -> ExperimentConfig:

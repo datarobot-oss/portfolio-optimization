@@ -20,7 +20,8 @@ from experiments.simulator_comparison.arms import (
     scenario_settings,
 )
 from experiments.simulator_comparison.config import ExperimentConfig
-from experiments.simulator_comparison.plotting import SIMULATOR_COLORS
+from experiments.simulator_comparison.plotting import EFFECT_STYLES, SIMULATOR_COLORS
+from experiments.simulator_comparison.portfolio_analysis import effect_curves
 from experiments.simulator_comparison.rebalancing import (
     backtest_scenarios,
     run_rebalancing_experiment,
@@ -30,7 +31,11 @@ from experiments.simulator_comparison.rebalancing_report import (
 )
 from experiments.simulator_comparison.report import write_report
 from experiments.simulator_comparison.runner import run_experiment
-from experiments.simulator_comparison.scores import PortfolioScores, ScenarioScores
+from experiments.simulator_comparison.scores import (
+    PortfolioScores,
+    ScenarioScores,
+    cell_column,
+)
 from experiments.simulator_comparison.swaps import (
     schaake_shuffle,
     stretch,
@@ -183,6 +188,7 @@ def _run_config(tmp_path, prices_path, arms=RUN_ARMS, **overrides):
         horizons=RUN_HORIZONS,
         rebalancing=dict(
             output=tmp_path / "rebalancing.parquet",
+            scenario_results=tmp_path / "results.parquet",
             arms=arms,
             trials=2,
             trading_days=10,
@@ -342,16 +348,14 @@ class TestComparison:
                 ),
             ],
         )
-        write_report(config.output, prices_path, tmp_path / "report")
+        outputs = write_report(config.output, prices_path, tmp_path / "report")
         effects = pd.read_csv(tmp_path / "report" / "swap_effects.csv")
-        assert set(effects["effect"]) == {
-            "marginals",
-            "dependence",
-            "interaction",
-            "construction",
-        }
+        assert set(effects["effect"]) == {style.name for style in EFFECT_STYLES}
         assert set(effects["horizon"]) == set(RUN_HORIZONS)
         assert "portfolio_equal_4_breach_05" in set(effects["metric"])
+        names = {path.name for path in outputs.files}
+        for plot in ("swap_effects_horizons", "swap_effects_portfolio_sizes"):
+            assert {f"{plot}.png", f"{plot}.svg"} <= names
 
 
 def test_swap_cells_need_their_donors(tmp_path, prices_path):
@@ -364,6 +368,14 @@ def test_every_cell_has_a_figure_color():
 
 
 class TestEffects:
+    DESCRIBED = {
+        WINDOW_ARM: {},
+        "jointfm-gpu": {},
+        "swap-jointfm-window": {"marginals": "jointfm-gpu"},
+        "swap-window-jointfm": {"marginals": WINDOW_ARM},
+        "swap-window-window": {"marginals": WINDOW_ARM},
+    }
+
     def _per_trial(self, effects):
         """Per-trial readings whose cells add up the planted ``effects``."""
         rng = np.random.default_rng(13)
@@ -397,16 +409,9 @@ class TestEffects:
             "interaction": 0.2,
             "construction": 0.05,
         }
-        described = {
-            WINDOW_ARM: {},
-            "jointfm-gpu": {},
-            "swap-jointfm-window": {"marginals": "jointfm-gpu"},
-            "swap-window-jointfm": {"marginals": WINDOW_ARM},
-            "swap-window-window": {"marginals": WINDOW_ARM},
-        }
-        design = swap_design(described)
-        table = swap_effects(self._per_trial(planted), ["score"], design)
-        medians = table.set_index("effect")["median"]
+        per_trial = self._per_trial(planted)
+        table = swap_effects(per_trial, ["score"], swap_design(self.DESCRIBED))
+        means = table.set_index("effect")["mean"]
         # Each main effect averages over the other factor, so it carries half the interaction.
         expected = {
             "marginals": 0.3 + 0.1,
@@ -415,9 +420,68 @@ class TestEffects:
             "construction": 0.05,
         }
         for effect, value in expected.items():
-            assert medians[effect] == pytest.approx(value, abs=2e-3)
+            assert means[effect] == pytest.approx(value, abs=2e-3)
         row = table.set_index("effect").loc["dependence"]
-        assert row["ci_low"] <= row["median"] <= row["ci_high"]
+        assert row["ci_low"] <= row["mean"] <= row["ci_high"]
+        cells = per_trial["score"].unstack("arm")
+        corner = (cells["jointfm-gpu"] - cells["swap-window-window"]).mean()
+        assert means["marginals"] + means["dependence"] == pytest.approx(corner)
+
+    def test_effect_in_few_trials_is_kept(self):
+        """A breach rate that JointFM's dependence raises in a quarter of the trials.
+
+        Over two origins a trial's breach rate is 0, 0.5, or 1, so the median
+        per-trial effect is 0 although the effect is there.
+        """
+        raised = set(range(5))
+        jointfm_dependence = ("jointfm-gpu", "swap-window-jointfm")
+        rows = [
+            {
+                "trial": trial,
+                "arm": arm,
+                "breach": 0.5 if trial in raised and arm in jointfm_dependence else 0.0,
+            }
+            for trial in range(20)
+            for arm in self.DESCRIBED
+        ]
+        per_trial = pd.DataFrame(rows).set_index(["trial", "arm"])
+        table = swap_effects(per_trial, ["breach"], swap_design(self.DESCRIBED))
+        dependence = table.set_index("effect").loc["dependence"]
+        assert dependence["mean"] == pytest.approx(0.5 * len(raised) / 20)
+        assert dependence["ci_low"] > 0
+
+    def test_portfolio_effects_become_size_curves(self):
+        """Each portfolio cell's effect lands at its kind, size, and reading."""
+        cells = [("equal", 1), ("equal", 4), ("long_short", 4)]
+        rows = [
+            {"trial": trial, "arm": arm, "score": 0.0}
+            | {
+                cell_column(kind, size, reading): float(trial * size)
+                * (arm == "jointfm-gpu")
+                for kind, size in cells
+                for reading in ("breach_05", "crps")
+            }
+            for trial in range(4)
+            for arm in self.DESCRIBED
+        ]
+        per_trial = pd.DataFrame(rows).set_index(["trial", "arm"])
+        columns = [c for c in per_trial.columns if c.startswith("portfolio_")]
+        effects = swap_effects(
+            per_trial, ["score", *columns], swap_design(self.DESCRIBED)
+        )
+        curves = effect_curves(effects)
+        # The scenario score is no portfolio cell, so it draws no size curve.
+        assert len(curves) == len(columns) * len(EFFECT_STYLES)
+        assert set(curves["arm"]) == {style.name for style in EFFECT_STYLES}
+        row = curves[
+            (curves["kind"] == "long_short")
+            & (curves["size"] == 4)
+            & (curves["reading"] == "crps")
+            & (curves["arm"] == "interaction")
+        ].iloc[0]
+        # Only the JointFM corner moves, by trial * size: a mean of 1.5 * 4.
+        assert row["estimate"] == pytest.approx(6.0)
+        assert row["ci_low"] <= row["estimate"] <= row["ci_high"]
 
     def test_design_is_absent_or_complete(self):
         assert swap_design({WINDOW_ARM: {}, "jointfm-gpu": {}}) is None
@@ -468,7 +532,7 @@ class TestRebalancing:
         assert cvar_data.cash_return == 0.001
 
     def test_backtests_run_every_cell_and_report_the_effects(
-        self, tmp_path, prices_path, fake_jointfm
+        self, tmp_path, prices_path, fake_jointfm, window_scenario_results
     ):
         fake_jointfm.envelope.n_input = 1000
         config = _run_config(tmp_path, prices_path)
@@ -478,8 +542,15 @@ class TestRebalancing:
         assert (per_trial["risk_aversion"].nunique() == 1).all()
         # Every JointFM request of a trial, the cells' included, carries its seed.
         assert len({call["seed"] for call in fake_jointfm.forecast_calls}) == 2
-        files = write_rebalancing_report(config.rebalancing.output, tmp_path / "report")
-        assert tmp_path / "report" / "rebalancing_swap_effects.csv" in files
+        files = write_rebalancing_report(
+            config.rebalancing.output,
+            window_scenario_results(config),
+            tmp_path / "report",
+        )
+        effects = pd.read_csv(tmp_path / "report" / "rebalancing_swap_effects.csv")
+        assert set(effects["effect"]) == {style.name for style in EFFECT_STYLES}
+        names = {path.name for path in files}
+        assert {"rebalancing_swap_effects.png", "rebalancing_swap_effects.svg"} <= names
 
 
 def test_swap_cells_need_scenarios_for_every_window_row(tmp_path, prices_path):

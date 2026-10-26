@@ -18,15 +18,17 @@ def _shipped(name):
     return yaml.safe_load((CONFIG_DIR / name).read_text())
 
 
-# Each set runs its base config and three twins (task experiments:pilot, :full).
+# Each set runs its base config and its risk-averse twin (task experiments:pilot,
+# :full); the pilot also runs the next-day and long-history twins.
 SETS = ["pilot", "full"]
-TWINS = ["next_day", "long_history", "risk_averse"]
+PILOT_TWINS = ["next_day", "long_history"]
 
 
 @pytest.mark.parametrize(
     "name",
     [f"{base}.yaml" for base in SETS]
-    + [f"{base}_{twin}.yaml" for base in SETS for twin in TWINS]
+    + [f"{base}_risk_averse.yaml" for base in SETS]
+    + [f"pilot_{twin}.yaml" for twin in PILOT_TWINS]
     + ["timing.yaml"],
 )
 def test_shipped_configs_are_valid(name):
@@ -36,14 +38,33 @@ def test_shipped_configs_are_valid(name):
 
 
 def _without_outputs(values):
-    del values["output"], values["rebalancing"]["output"]
+    rebalancing = values["rebalancing"]
+    del values["output"], rebalancing["output"], rebalancing["scenario_results"]
     return values
 
 
+@pytest.mark.parametrize(
+    "name",
+    [f"{base}.yaml" for base in SETS]
+    + [f"pilot_{twin}.yaml" for twin in PILOT_TWINS]
+    + ["timing.yaml"],
+)
+def test_report_reads_the_size_curves_of_its_own_scenario_comparison(name):
+    config = load_config(CONFIG_DIR / name)
+    assert config.rebalancing.scenario_results == config.output
+
+
 @pytest.mark.parametrize("base_name", SETS)
-def test_long_history_twin_differs_only_in_look_back_and_outputs(base_name):
-    base = _shipped(f"{base_name}.yaml")
-    twin = _shipped(f"{base_name}_long_history.yaml")
+def test_risk_averse_twin_reads_the_size_curves_of_its_base(base_name):
+    """The twin runs no scenario comparison; its trials and bounds are its base's."""
+    base = load_config(CONFIG_DIR / f"{base_name}.yaml")
+    twin = load_config(CONFIG_DIR / f"{base_name}_risk_averse.yaml")
+    assert twin.rebalancing.scenario_results == base.output
+
+
+def test_long_history_twin_differs_only_in_look_back_and_outputs():
+    base = _shipped("pilot.yaml")
+    twin = _shipped("pilot_long_history.yaml")
     assert twin["look_back"] > base["look_back"]
     assert twin["look_back"] <= base["origin_history"]
     for values in (base, twin):
@@ -51,11 +72,10 @@ def test_long_history_twin_differs_only_in_look_back_and_outputs(base_name):
     assert _without_outputs(twin) == _without_outputs(base)
 
 
-@pytest.mark.parametrize("base_name", SETS)
-def test_next_day_twin_differs_only_in_horizons_and_outputs(base_name):
+def test_next_day_twin_differs_only_in_horizons_and_outputs():
     """The twin's next day is a next-day-only request, read against its base's."""
-    base = _shipped(f"{base_name}.yaml")
-    twin = _shipped(f"{base_name}_next_day.yaml")
+    base = _shipped("pilot.yaml")
+    twin = _shipped("pilot_next_day.yaml")
     assert twin["horizons"] == [1]
     assert base["horizons"][0] == 1 and len(base["horizons"]) > 1
     for values in (base, twin):

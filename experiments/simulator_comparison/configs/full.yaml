@@ -8,12 +8,12 @@
 prices: data/stock_data/sp500.csv                                # daily price table the trials draw assets and dates from
 output: results/simulator_comparison/full.parquet                # scenario-comparison results (Parquet)
 trials: 200                                                      # scenario-comparison trials, each one asset universe with its own forecast dates
-origins: 20                                                      # forecast dates per trial
+origins: 4                                                       # forecast dates per trial
 assets: 100                                                      # assets per trial universe
 look_back: 252                                                   # daily returns before each forecast date that the simulators fit
 origin_history: 731                                              # daily returns a forecast date needs before it; only the date draw reads it
 forward: 63                                                      # daily returns after each forecast date, read only by the scores
-num_scen: 50000                                                  # scenarios each simulator generates per forecast
+num_scen: 20000                                                  # scenarios each simulator generates per forecast
 seed: 0                                                          # experiment seed; with the trial index it fixes assets, dates, and scenario seeds
 # jointfm runs on the device of the service .env selects; run the config again
 # with .env pointing at the other device's service to add that JointFM arm.
@@ -24,8 +24,9 @@ horizons: [1, 5, 21, 63]                                         # trading days 
 # Rebalancing backtest of the same trials' universes (task experiments:rebalance).
 rebalancing:                                                     # rebalancing backtest settings
   output: results/simulator_comparison/full_rebalancing.parquet  # rebalancing results (Parquet)
+  scenario_results: results/simulator_comparison/full.parquet    # scenario-comparison results whose size curves the report reads
   arms: [no_fit-cpu, gaussian-cpu, kde-gpu, jointfm, swap-jointfm-window, swap-window-jointfm, swap-window-window, jointfm-historical, window-independent]  # simulators backtested
-  trials: 200                                                    # backtest trials; trial i trades the assets of scenario trial i
+  trials: 60                                                     # backtest trials; trial i trades the assets of scenario trial i
   trading_days: 378                                              # trading days in each trial's randomly drawn trading window
   look_forward_window: 21                                        # trading days per step between re-optimization decisions
   # Calendar days, as rebalance_portfolio counts the look-back window.

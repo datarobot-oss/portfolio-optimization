@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import wilcoxon
 
-from .arms import HISTORICAL_MEAN_ARM
+from .arms import DERIVED_DONORS, HISTORICAL_MEAN_ARM, INDEPENDENT_ARM
 from .scores import (
     PIT_BINS,
     PORTFOLIO_CRPS,
@@ -242,7 +242,10 @@ def ranking(per_trial: pd.DataFrame) -> pd.DataFrame:
 
     Each score ranks the arms on its own (1 is best), and the rankings are
     never merged, since any weights between them would be arbitrary. Tied arms
-    share the better rank, and each counts the trial as won.
+    share the better rank, and each counts the trial as won. Only the
+    scenario simulators are ranked: the derived arms (``DERIVED_DONORS``)
+    are measurement arms, not candidates, and one that won a trial would
+    take the win from a simulator.
 
     Returns
     -------
@@ -250,9 +253,11 @@ def ranking(per_trial: pd.DataFrame) -> pd.DataFrame:
         Columns ``score``, ``arm``, ``mean_rank``, ``share_won``; per score
         in ``RANKING_SCORES`` order, best mean rank first.
     """
+    arms = per_trial.index.get_level_values("arm").unique()
+    simulators = [arm for arm in arms if arm not in DERIVED_DONORS]
     tables = []
     for score in RANKING_SCORES:
-        ranks = _wide(per_trial, score).rank(axis=1, method="min")
+        ranks = _wide(per_trial, score)[simulators].rank(axis=1, method="min")
         table = pd.DataFrame(
             {"mean_rank": ranks.mean(), "share_won": (ranks == 1).mean()}
         ).sort_values("mean_rank")
@@ -413,31 +418,64 @@ def swap_effects(
     - ``construction``: WW - window, what stretching and tie-breaking alone
       change, zero within noise when the swap adds nothing of its own.
 
+    Each effect is summarized by its mean over trials, as in
+    ``mean_attribution``: the two main effects' means sum to the mean of
+    JJ - WW, and a reading that changes in only some trials keeps its effect,
+    where the median of a breach rate over few origins per trial reads zero.
+
     Returns
     -------
     pd.DataFrame
-        One row per reading and effect: median over trials, its bootstrap
+        One row per reading and effect: mean over trials, its bootstrap
         interval, the Wilcoxon p-value, and the trial count.
     """
-    rows = []
-    for column in columns:
-        wide = _wide(per_trial, column)[list(design.values())].dropna()
-        cell = {key: wide[arm].to_numpy() for key, arm in design.items()}
-        effects = {
+
+    def split(cell: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        return {
             "marginals": (cell["JJ"] - cell["WJ"] + cell["JW"] - cell["WW"]) / 2,
             "dependence": (cell["JJ"] - cell["JW"] + cell["WJ"] - cell["WW"]) / 2,
             "interaction": cell["JJ"] - cell["WJ"] - cell["JW"] + cell["WW"],
             "construction": cell["WW"] - cell["window"],
         }
-        for effect, values in effects.items():
+
+    return _mean_effects(per_trial, columns, design, split, "effect")
+
+
+def _mean_effects(
+    per_trial: pd.DataFrame,
+    columns: Sequence[str],
+    design: Mapping[str, str],
+    split: Callable[[dict[str, np.ndarray]], dict[str, np.ndarray]],
+    key: str,
+) -> pd.DataFrame:
+    """Per reading, each per-trial effect ``split`` names, as its mean over trials.
+
+    ``design`` maps a role to an arm name; per reading of ``columns``, the
+    trials in which every arm of ``design`` has a value give each role one
+    value per trial, and ``split`` combines them into named per-trial
+    effects. Means are used because they add up and keep an effect that only
+    some trials show.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per reading and effect, the effect's name in column ``key``:
+        mean over trials, its bootstrap interval, the Wilcoxon p-value, and
+        the trial count.
+    """
+    rows = []
+    for column in columns:
+        wide = _wide(per_trial, column)[list(design.values())].dropna()
+        effects = split({role: wide[arm].to_numpy() for role, arm in design.items()})
+        for name, values in effects.items():
             low, high = bootstrap_interval(
-                values, np.median, np.random.default_rng(BOOTSTRAP_SEED)
+                values, np.mean, np.random.default_rng(BOOTSTRAP_SEED)
             )
             rows.append(
                 {
                     "metric": column,
-                    "effect": effect,
-                    "median": float(np.median(values)),
+                    key: name,
+                    "mean": float(values.mean()),
                     "ci_low": low,
                     "ci_high": high,
                     "p_value": _wilcoxon_p_value(values),
@@ -445,6 +483,64 @@ def swap_effects(
                 }
             )
     return pd.DataFrame(rows)
+
+
+def independence_design(described_arms: Mapping[str, dict]) -> dict[str, str] | None:
+    """The arms of the independence control's reading, or None without it.
+
+    ``described_arms`` is a results file's ``arms`` identity (``describe_arms``),
+    which names the window arm whose rows the control permuted.
+
+    Returns
+    -------
+    dict or None
+        ``control`` (``INDEPENDENT_ARM``) and ``window`` to arm names when the
+        control is among ``described_arms``; None when it is not.
+
+    Raises
+    ------
+    ValueError
+        If the control's window arm is missing, which leaves nothing to
+        compare it with.
+    """
+    if INDEPENDENT_ARM not in described_arms:
+        return None
+    window = described_arms[INDEPENDENT_ARM]["window"]
+    if window not in described_arms:
+        raise ValueError(
+            f"The independence control needs its window arm {window} next to "
+            f"{INDEPENDENT_ARM}."
+        )
+    return {"control": INDEPENDENT_ARM, "window": window}
+
+
+# Name of the independence control's one effect.
+INDEPENDENCE_EFFECT = "independence"
+
+
+def independence_effects(
+    per_trial: pd.DataFrame, columns: Sequence[str], design: Mapping[str, str]
+) -> pd.DataFrame:
+    """How far each reading moves once all dependence is removed.
+
+    Per trial and reading, with ``design`` from ``independence_design``, the
+    effect ``INDEPENDENCE_EFFECT`` is control - window: the window's
+    scenarios with every asset's rows permuted independently minus the same
+    scenarios as they are, which share every marginal and mean, so only the
+    dependence differs. It is summarized by its mean over trials, as the
+    swap effects are, so a breach rate over few origins per trial keeps it.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per reading, as ``swap_effects`` gives it, with the effect
+        ``INDEPENDENCE_EFFECT``.
+    """
+
+    def split(arm: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        return {INDEPENDENCE_EFFECT: arm["control"] - arm["window"]}
+
+    return _mean_effects(per_trial, columns, design, split, "effect")
 
 
 def mean_attribution_design(
@@ -507,31 +603,15 @@ def mean_attribution(
         One row per reading and part: mean over trials, its bootstrap
         interval, the Wilcoxon p-value, and the trial count.
     """
-    rows = []
-    for column in columns:
-        wide = _wide(per_trial, column)[list(design.values())].dropna()
-        arm = {key: wide[name].to_numpy() for key, name in design.items()}
-        parts = {
+
+    def split(arm: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        return {
             "total": arm["jointfm"] - arm["window"],
             "expected_returns": arm["jointfm"] - arm["historical"],
             "scenarios": arm["historical"] - arm["window"],
         }
-        for part, values in parts.items():
-            low, high = bootstrap_interval(
-                values, np.mean, np.random.default_rng(BOOTSTRAP_SEED)
-            )
-            rows.append(
-                {
-                    "metric": column,
-                    "part": part,
-                    "mean": float(values.mean()),
-                    "ci_low": low,
-                    "ci_high": high,
-                    "p_value": _wilcoxon_p_value(values),
-                    "trials": len(values),
-                }
-            )
-    return pd.DataFrame(rows)
+
+    return _mean_effects(per_trial, columns, design, split, "part")
 
 
 def stack_horizons(tables: Mapping[int, pd.DataFrame]) -> pd.DataFrame:

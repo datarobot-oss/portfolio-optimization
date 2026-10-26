@@ -10,15 +10,21 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from experiments.simulator_comparison import rebalancing_report
 from experiments.simulator_comparison.analysis import (
+    INDEPENDENCE_EFFECT,
+    independence_design,
+    independence_effects,
     mean_attribution,
     mean_attribution_design,
 )
 from experiments.simulator_comparison.arms import (
     ARMS_BY_NAME,
+    DERIVED_DONORS,
     HISTORICAL_MEAN_ARM,
     INDEPENDENT_ARM,
     JOINTFM_ARM,
+    SWAP_DONORS,
     WINDOW_ARM,
     HistoricalMeanArm,
     IndependentArm,
@@ -30,12 +36,17 @@ from experiments.simulator_comparison.independence import (
     independence_rng,
     permute_assets,
 )
-from experiments.simulator_comparison.plotting import SIMULATOR_COLORS
+from experiments.simulator_comparison.plotting import (
+    ATTRIBUTION_STYLES,
+    SIMULATOR_COLORS,
+)
 from experiments.simulator_comparison.rebalancing import (
+    METRICS,
     backtest_scenarios,
     run_rebalancing_experiment,
 )
 from experiments.simulator_comparison.rebalancing_report import (
+    METRIC_LABELS,
     write_rebalancing_report,
 )
 from experiments.simulator_comparison.report import write_report
@@ -116,6 +127,7 @@ def _config(
         horizons=HORIZONS,
         rebalancing=dict(
             output=tmp_path / "rebalancing.parquet",
+            scenario_results=tmp_path / "results.parquet",
             arms=rebalancing_arms,
             trials=2,
             trading_days=10,
@@ -387,7 +399,7 @@ class TestAttribution:
             )
 
     def test_backtests_run_every_arm_and_report_the_split(
-        self, tmp_path, prices_path, fake_jointfm
+        self, tmp_path, prices_path, fake_jointfm, monkeypatch, window_scenario_results
     ):
         fake_jointfm.envelope.n_input = 1000
         config = _config(tmp_path, prices_path)
@@ -406,13 +418,123 @@ class TestAttribution:
         described = metadata.identity["arms"][HISTORICAL_MEAN_ARM]
         assert described["scenarios"] == JOINTFM_CPU
         assert described["jointfm_settings"]["expected_return"] == "historical"
-        files = write_rebalancing_report(config.rebalancing.output, tmp_path / "report")
+        drawn = []
+        draw_panel = rebalancing_report._interval_panel
+
+        def record_panel(ax, rows, **kwargs):
+            drawn.append(rows)
+            draw_panel(ax, rows, **kwargs)
+
+        monkeypatch.setattr(rebalancing_report, "_interval_panel", record_panel)
+        files = write_rebalancing_report(
+            config.rebalancing.output,
+            window_scenario_results(config),
+            tmp_path / "report",
+        )
         path = tmp_path / "report" / "rebalancing_mean_attribution.csv"
         assert path in files
-        table = pd.read_csv(path).set_index(["metric", "part"])["mean"]
+        table = pd.read_csv(path).set_index(["metric", "part"])
+        means = table["mean"]
         wide = frame.set_index(["trial", "arm"])["annualized_volatility"].unstack()
         total = (wide[JOINTFM_CPU] - wide[WINDOW_ARM]).mean()
-        assert table["annualized_volatility", "total"] == pytest.approx(total)
-        assert table["annualized_volatility", "expected_returns"] + table[
+        assert means["annualized_volatility", "total"] == pytest.approx(total)
+        assert means["annualized_volatility", "expected_returns"] + means[
             "annualized_volatility", "scenarios"
         ] == pytest.approx(total)
+        names = {file.name for file in files}
+        assert {
+            "rebalancing_mean_attribution.png",
+            "rebalancing_mean_attribution.svg",
+        } <= names
+        # One panel per reading, each part at the table's mean and interval.
+        panels = [rows for rows in drawn if rows[0][0] in ATTRIBUTION_STYLES]
+        assert len(panels) == len(METRICS)
+        for metric, rows in zip(METRICS, panels):
+            assert [row[0] for row in rows] == list(ATTRIBUTION_STYLES)
+            scale = METRIC_LABELS[metric][3]
+            for style, *values in rows:
+                expected = table.loc[
+                    (metric, style.name), ["mean", "ci_low", "ci_high"]
+                ]
+                np.testing.assert_allclose(
+                    values, scale * expected.to_numpy(dtype=float)
+                )
+
+
+class TestIndependenceEffects:
+    DESCRIBED = {WINDOW_ARM: {}, INDEPENDENT_ARM: {"window": WINDOW_ARM}}
+
+    def test_planted_difference_from_the_window_is_recovered(self):
+        rng = np.random.default_rng(13)
+        rows = []
+        for trial in range(40):
+            base = rng.normal()
+            removed = 0.4 + rng.normal(0.0, 0.05)
+            rows.append({"trial": trial, "arm": WINDOW_ARM, "score": base})
+            rows.append(
+                {"trial": trial, "arm": INDEPENDENT_ARM, "score": base + removed}
+            )
+        per_trial = pd.DataFrame(rows).set_index(["trial", "arm"])
+        design = independence_design(self.DESCRIBED)
+        (row,) = independence_effects(per_trial, ["score"], design).itertuples()
+        assert row.effect == INDEPENDENCE_EFFECT
+        assert row.mean == pytest.approx(0.4, abs=0.03)
+        assert row.ci_low < 0.4 < row.ci_high
+        assert row.trials == 40
+
+    def test_breach_raised_in_few_trials_keeps_its_mean(self):
+        """Over two origins a trial's breach rate is 0, 0.5, or 1, so the median
+        per-trial difference is 0 although removing dependence raised it."""
+        raised = set(range(5))
+        rows = [
+            {
+                "trial": trial,
+                "arm": arm,
+                "breach": 0.5 if arm == INDEPENDENT_ARM and trial in raised else 0.0,
+            }
+            for trial in range(20)
+            for arm in self.DESCRIBED
+        ]
+        per_trial = pd.DataFrame(rows).set_index(["trial", "arm"])
+        design = independence_design(self.DESCRIBED)
+        (row,) = independence_effects(per_trial, ["breach"], design).itertuples()
+        assert row.mean == pytest.approx(0.5 * len(raised) / 20)
+        assert row.ci_low > 0
+
+    def test_design_is_absent_or_complete(self):
+        assert independence_design({WINDOW_ARM: {}, "jointfm-gpu": {}}) is None
+        with pytest.raises(ValueError, match=WINDOW_ARM):
+            independence_design({INDEPENDENT_ARM: {"window": WINDOW_ARM}})
+
+
+def test_rebalancing_measurement_arms_are_drawn_only_by_their_readers(
+    tmp_path, prices_path, fake_jointfm, window_scenario_results, saved_figures
+):
+    """Every per-arm figure of the rebalancing report names the simulators
+    alone, and every measurement arm's reader is drawn."""
+    fake_jointfm.envelope.n_input = 1000
+    arms = (*COMPARISON_ARMS, *SWAP_DONORS)
+    config = _config(
+        tmp_path, prices_path, arms=arms, rebalancing_arms=(*arms, HISTORICAL_MEAN_ARM)
+    )
+    run_rebalancing_experiment(config)
+    write_rebalancing_report(
+        config.rebalancing.output, window_scenario_results(config), tmp_path / "report"
+    )
+    readers = {
+        **dict.fromkeys(SWAP_DONORS, "rebalancing_swap_effects"),
+        HISTORICAL_MEAN_ARM: "rebalancing_mean_attribution",
+        INDEPENDENT_ARM: "rebalancing_independence_control",
+    }
+    per_arm = set(saved_figures) - set(readers.values())
+    assert {"rebalancing_differences", "rebalancing_paths"} <= per_arm
+    for name in per_arm:
+        assert "jointfm" in saved_figures[name], name
+        named = [arm for arm in DERIVED_DONORS if arm in saved_figures[name]]
+        assert named == [], name
+    for arm, name in readers.items():
+        assert name in saved_figures, arm
+    for arm in (HISTORICAL_MEAN_ARM, INDEPENDENT_ARM):
+        assert arm in saved_figures[readers[arm]]
+    control = pd.read_csv(tmp_path / "report" / "rebalancing_independence_control.csv")
+    assert set(control["metric"]) == set(METRICS)

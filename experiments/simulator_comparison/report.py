@@ -12,7 +12,12 @@ portfolio size (``portfolio_analysis``), how every reading changes across
 market regimes of the origins (``regimes``) and over the horizons after the
 origin, and what each arm costs to generate. With the dependence swap arms
 (``swaps``) it also splits every reading into what JointFM's marginals and
-its dependence cause (``swap_effects.csv``). Every table holds every horizon
+its dependence cause (``swap_effects.csv``), and draws the splits of the
+scores over the horizons and of the portfolio readings over the portfolio
+size. With the independence control it gives, and draws alike, how far every
+reading moves once all dependence is removed (``independence_control.csv``).
+The per-arm figures draw the scenario simulators only; the swap cells and
+the control appear in those effect figures. Every table holds every horizon
 in its ``horizon`` column; the figures other than the horizon figures show
 the next day. Run it as
 ``python -m experiments.simulator_comparison.report``. The figures follow
@@ -27,6 +32,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from matplotlib.figure import Figure
 from matplotlib.ticker import MaxNLocator, PercentFormatter
 
 from .analysis import (
@@ -38,6 +44,8 @@ from .analysis import (
     aggregate,
     comparisons,
     complete_trials,
+    independence_design,
+    independence_effects,
     ranking,
     reliability,
     skill,
@@ -51,6 +59,7 @@ from .analysis import (
 from .config import load_config
 from .plotting import (
     GRID,
+    INDEPENDENCE_FIGURES,
     INK,
     INK_SECONDARY,
     INTERVAL_TICKS,
@@ -59,22 +68,27 @@ from .plotting import (
     MARKER_AREA,
     MARKER_EDGE,
     SURFACE,
+    SWAP_FIGURES,
     ArmStyle,
+    EffectStyle,
+    Style,
     _arm_axis,
     _arm_legend,
     _box,
     _curves,
     _device_legend,
     _dots,
+    _effect_legend,
     _figure,
     _interval_panel,
     _save,
     _target_line,
     _title,
-    arm_styles,
+    simulator_styles,
 )
-from .portfolio_analysis import portfolio_pit, size_curves
+from .portfolio_analysis import effect_curves, portfolio_pit, size_curves
 from .portfolio_report import (
+    plot_effect_sizes,
     plot_portfolio_horizons,
     plot_portfolio_pit,
     plot_portfolio_sizes,
@@ -411,11 +425,11 @@ def plot_timing(
     styles: Sequence[ArmStyle],
     directory: Path,
 ):
-    """Seconds per scenario-generation call per arm, with GPU speedups."""
-    timed = frame[~frame["warmup"]]
+    """Seconds per scenario-generation call per arm of ``styles``, with GPU speedups."""
+    positions = {style.name: position for position, style in enumerate(styles)}
+    timed = frame[~frame["warmup"] & frame["arm"].isin(positions)]
     figure, axes = _figure(12, 6)
     ax = axes[0, 0]
-    positions = {style.name: position for position, style in enumerate(styles)}
     for position, style in enumerate(styles):
         seconds = timed.loc[timed["arm"] == style.name, "seconds"].to_numpy()
         _box(ax, position, seconds, style)
@@ -628,6 +642,27 @@ def plot_regimes(
     return files
 
 
+def _horizon_grid(
+    panels: Sequence[tuple[str, str, Sequence[Style], pd.DataFrame, float]],
+) -> Figure:
+    """``PANEL_COLUMNS`` panels a row, each a set of curves over the horizon.
+
+    Each panel is (title, unit, styles, table, reference): ``table`` holds
+    one row per (``horizon``, ``arm``) as ``_curves`` reads it, drawn for
+    ``styles``, and a horizontal line marks ``reference``.
+    """
+    rows = -(-len(panels) // PANEL_COLUMNS)
+    figure, axes = _figure(14, 3.6 * rows, rows=rows, cols=PANEL_COLUMNS)
+    for ax, (title, unit, styles, table, reference) in zip(axes.flat, panels):
+        _target_line(ax, reference)
+        _curves(ax, table, "horizon", styles)
+        ax.set_xlabel("trading days after the origin", fontsize=8)
+        _title(ax, title, unit)
+    for ax in list(axes.flat)[len(panels) :]:
+        ax.set_visible(False)
+    return figure
+
+
 def plot_horizons(
     readings: dict[str, pd.DataFrame], styles: Sequence[ArmStyle], directory: Path
 ) -> list[Path]:
@@ -638,25 +673,28 @@ def plot_horizons(
     ``plot_regimes`` (``_reading_panels``), each arm a line through its
     estimates at the horizons, with its interval at each.
     """
-    panels = _reading_panels(readings, styles, ["horizon"])
     horizons = sorted(readings["summary"]["horizon"].unique())
-    rows = -(-len(panels) // PANEL_COLUMNS)
-    figure, axes = _figure(14, 3.6 * rows, rows=rows, cols=PANEL_COLUMNS)
-    for ax, (title, unit, arms, values, reference) in zip(axes.flat, panels):
-        table = pd.DataFrame(
-            [
-                (horizon, style.name, *values[(horizon, style.name)])
-                for horizon in horizons
-                for style in arms
-            ],
-            columns=["horizon", "arm", "estimate", "ci_low", "ci_high"],
-        )
-        _target_line(ax, reference)
-        _curves(ax, table, "horizon", arms)
-        ax.set_xlabel("trading days after the origin", fontsize=8)
-        _title(ax, title, unit)
-    for ax in list(axes.flat)[len(panels) :]:
-        ax.set_visible(False)
+    figure = _horizon_grid(
+        [
+            (
+                title,
+                unit,
+                arms,
+                pd.DataFrame(
+                    [
+                        (horizon, style.name, *values[(horizon, style.name)])
+                        for horizon in horizons
+                        for style in arms
+                    ],
+                    columns=["horizon", "arm", "estimate", "ci_low", "ci_high"],
+                ),
+                reference,
+            )
+            for title, unit, arms, values, reference in _reading_panels(
+                readings, styles, ["horizon"]
+            )
+        ]
+    )
     figure.suptitle(
         "Readings over the horizon after the origin: point and 95 % bootstrap "
         "interval over trials",
@@ -665,6 +703,40 @@ def plot_horizons(
     )
     _arm_legend(figure, styles)
     return _save(figure, directory, "horizons")
+
+
+def plot_effect_horizons(
+    effects: pd.DataFrame,
+    styles: Sequence[EffectStyle],
+    title: str,
+    name: str,
+    directory: Path,
+) -> list[Path]:
+    """Every score's effects over the horizon, one panel per score.
+
+    ``effects`` is ``swap_effects`` or ``independence_effects`` stacked over
+    the horizons. The panels are the scores of ``plot_horizons``, each effect
+    of ``styles`` a line through its means at the horizons with its interval
+    at each, against zero. ``title`` names the effects in the figure's
+    heading, and the figure is saved as ``name``.
+    """
+    panels = []
+    for column in COMPARED_SCORES:
+        label, unit, target = SCORE_LABELS[column]
+        table = effects[effects["metric"] == column].rename(
+            columns={"effect": "arm", "mean": "estimate"}
+        )
+        side = "; lower is better" if target is None else ""
+        panels.append((label, f"{unit}{side}", styles, table, 0.0))
+    figure = _horizon_grid(panels)
+    figure.suptitle(
+        f"{title} over the horizon after the origin: mean over trials and 95 % "
+        f"bootstrap interval; 0 is no effect",
+        color=INK,
+        fontsize=10,
+    )
+    _effect_legend(figure, styles)
+    return _save(figure, directory, name)
 
 
 def _check_scores_recorded(identity: dict) -> None:
@@ -714,8 +786,9 @@ def write_report(
         If the file holds no scenario or portfolio scores or no horizons, the
         price file is not the one the results were measured on, an excluded arm is not in the file, the
         reference arm is missing or excluded, fewer trials are complete than
-        the report needs, a regime holds too few trials or has tied bounds, or
-        the swap design is incomplete.
+        the report needs, a regime holds too few trials or has tied bounds,
+        the swap design is incomplete, or the independence control lacks its
+        window arm.
     """
     frame, metadata = read_results(results_path)
     identity = metadata.identity
@@ -734,7 +807,7 @@ def write_report(
     frames = {horizon: frame[frame["horizon"] == horizon] for horizon in horizons}
     per_trial = {horizon: aggregate(rows) for horizon, rows in frames.items()}
     next_day = per_trial[1]
-    styles = arm_styles(next_day)
+    styles = simulator_styles(next_day)
     skills = {horizon: skill(table) for horizon, table in per_trial.items()}
     readings = {
         "summary": {h: summary(table) for h, table in per_trial.items()},
@@ -754,21 +827,27 @@ def write_report(
     regime_tables = {
         horizon: regime_readings(rows, regimes) for horizon, rows in frames.items()
     }
-    design = swap_design({arm: identity["arms"][arm] for arm in arms})
-    if design is not None:
-        effect_columns = [
-            *COMPARED_SCORES,
-            *(
-                cell_column(kind, size, reading)
-                for kind, size in recorded_cells(frame.columns)
-                for reading in PORTFOLIO_READINGS
-                if not reading.startswith("pit_")
-            ),
-        ]
-        readings["swap_effects"] = {
-            h: swap_effects(table, effect_columns, design)
-            for h, table in per_trial.items()
-        }
+    described = {arm: identity["arms"][arm] for arm in arms}
+    effect_columns = [
+        *COMPARED_SCORES,
+        *(
+            cell_column(kind, size, reading)
+            for kind, size in recorded_cells(frame.columns)
+            for reading in PORTFOLIO_READINGS
+            if not reading.startswith("pit_")
+        ),
+    ]
+    effect_figures = []
+    for figures, design, effects in (
+        (SWAP_FIGURES, swap_design(described), swap_effects),
+        (INDEPENDENCE_FIGURES, independence_design(described), independence_effects),
+    ):
+        if design is not None:
+            readings[figures[0]] = {
+                h: effects(table, effect_columns, design)
+                for h, table in per_trial.items()
+            }
+            effect_figures.append(figures)
     stacked = {name: stack_horizons(tables) for name, tables in readings.items()}
     tables = {
         **stacked,
@@ -803,6 +882,17 @@ def write_report(
     files += plot_portfolio_pit(readings["portfolio_pit"][1], styles, output_dir)
     files += plot_horizons(stacked, styles, output_dir)
     files += plot_portfolio_horizons(stacked["portfolio_sizes"], styles, output_dir)
+    for name, title, effect_styles in effect_figures:
+        files += plot_effect_horizons(
+            stacked[name], effect_styles, title, f"{name}_horizons", output_dir
+        )
+        files += plot_effect_sizes(
+            effect_curves(readings[name][1]),
+            effect_styles,
+            title,
+            f"{name}_portfolio_sizes",
+            output_dir,
+        )
     return ReportOutputs(files=files, excluded_trials=excluded)
 
 

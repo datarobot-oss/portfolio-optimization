@@ -8,7 +8,9 @@
 # Twin of pilot.yaml that differs only in the base risk aversion and its results
 # files, high enough for the CVaR term rather than the expected returns to decide
 # the weights; only its rebalancing backtest (task experiments:rebalance) differs
-# from pilot.yaml's.
+# from pilot.yaml's. It runs no scenario comparison of its own, so its report
+# reads the size curves of pilot.yaml's scenario results (scenario_results).
+# task experiments:paired (SETTING=risk_aversion) pairs the two backtests by trial.
 
 prices: data/stock_data/sp500.csv
 output: results/simulator_comparison/pilot_risk_averse.parquet
@@ -29,6 +31,7 @@ horizons: [1, 5, 21, 63]
 # Rebalancing backtest of the same trials' universes (task experiments:rebalance).
 rebalancing:
   output: results/simulator_comparison/pilot_risk_averse_rebalancing.parquet
+  scenario_results: results/simulator_comparison/pilot.parquet
   arms: [no_fit-cpu, gaussian-cpu, kde-gpu, jointfm, swap-jointfm-window, swap-window-jointfm, swap-window-window, jointfm-historical, window-independent]
   trials: 20
   trading_days: 378

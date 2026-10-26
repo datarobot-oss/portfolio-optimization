@@ -223,6 +223,7 @@ A YAML file under [`experiments/simulator_comparison/configs/`](experiments/simu
 
 ```bash
 task setup                                   # reconcile uv.lock, install everything the tasks use, the pre-commit hooks, and the Jupyter kernel
+task pre-commit                              # every pre-commit hook on all files, the pytest suite included
 task experiments:pilot                       # every experiment at a small size, resuming its results
 task experiments:full                        # every experiment at full size, resuming its results
 task experiments:all                         # run and report everything of full.yaml alone, resuming its results
@@ -237,15 +238,18 @@ task data:risk-free-rates                    # download the T-bill rates the reb
 | --- | --- |
 | `setup` | Runs `uv lock`, which changes `uv.lock` only where `pyproject.toml` changed and keeps every other pin, then installs the locked environment with the `CUDA_EXTRA`, `jointfm`, and `experiments` extras and the `dev` and `notebooks` groups. It reports whether `uv.lock` has uncommitted changes. |
 | `lock:upgrade` | Moves every pin in `uv.lock` to the newest version `pyproject.toml` allows, installs it, and runs `experiments:test`. Run it deliberately, between experiments whose results are compared, and commit `uv.lock` once the tests and a pilot run pass. |
-| `experiments:pilot` | Runs every experiment at a small size: `pilot.yaml` and its next-day, long-history, and risk-averse twins, with every report and the history comparison, to measure cost per arm and noise before the full run. Rerunning resumes every results file. |
+| `pre-commit` | Runs every hook of [`.pre-commit-config.yaml`](.pre-commit-config.yaml) on all files, the pytest suite included. A `git commit` runs the same hooks on the files it stages, once `setup` has installed them. |
+| `experiments:pilot` | Runs every experiment at a small size: `pilot.yaml` and its next-day, long-history, and risk-averse twins, with every report and the paired comparison of each twin against the base, to measure cost per arm and noise before the full run and to recheck a newly served checkpoint. Rerunning resumes every results file. |
 | `experiments:pilot-fresh` | Deletes every output of `experiments:pilot`, then runs it from scratch |
-| `experiments:full` | Runs every experiment at full size: `full.yaml` and its three twins, as `experiments:pilot` does for the pilot set. Rerunning resumes every results file. |
+| `experiments:full` | Runs every experiment at full size: `full.yaml` and its risk-averse twin, with both reports and the paired comparison of the two backtests. Rerunning resumes every results file. |
 | `experiments:full-fresh` | Deletes every output of `experiments:full`, then runs it from scratch |
 | `experiments:run` | Runs a config (default `full.yaml`). Rerunning resumes its results file, and a larger `trials` extends it. |
 | `experiments:report` | Writes the tables and plots of a config's results. `EXCLUDE` leaves out arms, for example one whose session is still running (`EXCLUDE=jointfm-cpu`). |
 | `experiments:rebalance` | Runs a config's rebalancing backtests (each trial's universe, once per simulator) and writes their report: returns, drawdown, Sharpe, Sortino, and Calmar ratios, turnover |
 | `experiments:rebalance-report` | Writes the rebalancing report of a config's results without running anything |
-| `experiments:all` | Runs a config's scenario comparison (default `full.yaml`), the rebalancing backtests, and both reports. Rerunning resumes both results files, so it continues an interrupted `experiments:fresh`. |
+| `experiments:blog` | Writes the blog figures of a config's scenario and rebalancing results to `<output stem>_blog/`, without running anything: the readings a post about JointFM shows, apart from the reports, which show every reading |
+| `experiments:paired` | Compares, trial by trial and without running anything, the results of two configs `BASELINE` and `CONFIG` that differ only in `SETTING` (`look_back`, `horizons`, `risk_aversion`, or `checkpoint`) and their output files; `RESULTS` picks their `scenario` or `rebalancing` results |
+| `experiments:all` | Runs a config's scenario comparison (default `full.yaml`), the rebalancing backtests, both reports, and the blog figures. Rerunning resumes both results files, so it continues an interrupted `experiments:fresh`. |
 | `experiments:fresh` | Deletes every output of a config (default `full.yaml`), then runs `experiments:all` from scratch |
 | `experiments:timing` | Times JointFM on CPU against GPU from scratch (`timing.yaml`), one session per service: `GPU_URL` and `CPU_URL` |
 | `experiments:test` | Runs the experiments' CPU tests |

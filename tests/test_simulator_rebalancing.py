@@ -52,6 +52,7 @@ def prices_path(tmp_path):
 def _config(tmp_path, prices_path, **rebalancing):
     values = dict(
         output=tmp_path / "rebalancing.parquet",
+        scenario_results=tmp_path / "results.parquet",
         arms=ARMS,
         trials=2,
         trading_days=TRADING_DAYS,
@@ -103,7 +104,9 @@ def test_window_is_reproducible_and_fits(prices_path):
     assert prices.index[window.start] - prices.index[0] >= pd.Timedelta(days=90)
 
 
-def test_runs_every_arm_on_identical_trials(tmp_path, prices_path, fake_jointfm):
+def test_runs_every_arm_on_identical_trials(
+    tmp_path, prices_path, fake_jointfm, window_scenario_results
+):
     fake_jointfm.envelope.n_input = 1000
     config = _config(tmp_path, prices_path)
     frame = run_rebalancing_experiment(config, command=["first"])
@@ -139,10 +142,16 @@ def test_runs_every_arm_on_identical_trials(tmp_path, prices_path, fake_jointfm)
     assert metadata.identity["rebalancing"]["solver"] == "CLARABEL"
     assert "cvxpy" in metadata.identity["packages"]
 
-    files = write_rebalancing_report(config.rebalancing.output, tmp_path / "report")
+    files = write_rebalancing_report(
+        config.rebalancing.output,
+        window_scenario_results(config),
+        tmp_path / "report",
+    )
     names = {path.name for path in files}
     for plot in ("rebalancing_differences", "rebalancing_paths"):
         assert {f"{plot}.png", f"{plot}.svg"} <= names
+    # Without the historical-mean arm there is no attribution to draw.
+    assert not any(name.startswith("rebalancing_mean_attribution") for name in names)
     comparisons = pd.read_csv(tmp_path / "report" / "rebalancing_comparisons.csv")
     assert set(comparisons["reference"]) == {"no_fit-cpu"}
     chosen = pd.read_csv(tmp_path / "report" / "rebalancing_chosen_risk.csv")

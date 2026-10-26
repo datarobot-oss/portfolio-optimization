@@ -7,8 +7,8 @@
 #
 # Twin of pilot.yaml that differs only in horizons and its results files: its
 # JointFM next day comes from a next-day-only request instead of the
-# multi-horizon one, so the two reports show whether querying more horizons
-# changes JointFM's next-step forecast.
+# multi-horizon one, so task experiments:paired (SETTING=horizons) shows whether
+# querying more horizons changes JointFM's next-step forecast.
 
 prices: data/stock_data/sp500.csv
 output: results/simulator_comparison/pilot_next_day.parquet
@@ -29,6 +29,7 @@ horizons: [1]
 # Rebalancing backtest of the same trials' universes (task experiments:rebalance).
 rebalancing:
   output: results/simulator_comparison/pilot_next_day_rebalancing.parquet
+  scenario_results: results/simulator_comparison/pilot_next_day.parquet
   arms: [no_fit-cpu, gaussian-cpu, kde-gpu, jointfm, swap-jointfm-window, swap-window-jointfm, swap-window-window, jointfm-historical, window-independent]
   trials: 20
   trading_days: 378

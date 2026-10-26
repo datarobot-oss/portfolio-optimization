@@ -8,13 +8,21 @@ arms within a trial against ``no_fit``, the historical scenarios, with
 bootstrap intervals over trials, as the scenario report does. With the
 dependence swap arms it also splits every reading into what JointFM's
 marginals and its dependence cause (``rebalancing_swap_effects.csv``, from
-``analysis.swap_effects``), and with the historical-mean JointFM arm into
-what JointFM's expected returns and its scenarios cause
-(``rebalancing_mean_attribution.csv``, from ``analysis.mean_attribution``).
+``analysis.swap_effects``, drawn as ``rebalancing_swap_effects.png``), and
+with the historical-mean JointFM arm into what JointFM's expected returns and
+its scenarios cause (``rebalancing_mean_attribution.csv``, from
+``analysis.mean_attribution``, drawn as ``rebalancing_mean_attribution.png``).
 Whether the backtest sees dependence at all reads off the independence
-control's row in ``rebalancing_comparisons.csv``. How the risk of the
+control's mean paired difference from ``no_fit`` per reading
+(``rebalancing_independence_control.csv``, from
+``analysis.independence_effects``, drawn as
+``rebalancing_independence_control.png``). The per-arm figures draw the
+scenario simulators only; the measurement arms appear in those three effect
+figures. How the risk of the
 portfolios each arm chose compares with their outcome, against the binomial
-band of a correct VaR, is ``rebalancing_chosen_risk.csv`` (``chosen_risk``).
+band of a correct VaR, is ``rebalancing_chosen_risk.csv`` (``chosen_risk``),
+drawn over the next-day size curves of the scenario comparison's random
+portfolios as ``rebalancing_chosen_risk.png`` (``chosen_report``).
 Colors, fills, and labels follow that report.
 """
 
@@ -25,6 +33,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from matplotlib.figure import Figure
 from matplotlib.ticker import MaxNLocator
 from scipy.stats import binom
 
@@ -35,27 +44,41 @@ from .analysis import (
     REFERENCE_ARM,
     bootstrap_interval,
     compare,
+    independence_design,
+    independence_effects,
     mean_attribution,
     mean_attribution_design,
     swap_design,
     swap_effects,
 )
 from .chosen import CHOSEN_METRICS
+from .chosen_report import (
+    backtest_universes,
+    next_day_trials,
+    plot_chosen_risk,
+    random_size_curves,
+)
 from .config import load_config
 from .plotting import (
+    ATTRIBUTION_STYLES,
+    INDEPENDENCE_FIGURES,
     INK,
     INK_SECONDARY,
     LINE_WIDTH,
     MARKER_EDGE,
     SURFACE,
+    SWAP_FIGURES,
     ArmStyle,
+    EffectStyle,
+    Style,
     _device_legend,
+    _effect_legend,
     _figure,
     _interval_panel,
     _save,
     _target_line,
     _title,
-    arm_styles,
+    simulator_styles,
 )
 from .rebalancing import METRICS
 from .table import read_results
@@ -275,13 +298,23 @@ def chosen_risk(frame: pd.DataFrame, confidence: float) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def plot_differences(table: pd.DataFrame, styles: Sequence[ArmStyle], directory: Path):
-    """One panel per reading: each arm's median paired difference from the reference.
+def _metric_grid(
+    table: pd.DataFrame,
+    styles: Sequence[Style],
+    *,
+    key: str,
+    estimate: str,
+    reference_label: str,
+    subtitle: str,
+) -> Figure:
+    """One panel per reading of ``METRICS``, one interval row per style.
 
-    Pairing by trial removes the spread between trials (universe and period)
-    that every arm shares, so the panels show only what the simulator changes.
+    ``table`` holds one row per (``metric``, ``key``) with the columns
+    ``estimate``, ``ci_low``, and ``ci_high``; each style's row is the one
+    whose ``key`` is its name, scaled to the reading's display units and
+    drawn against zero, labeled ``reference_label``. Each panel's subtitle is
+    ``subtitle`` and the side of zero that is better.
     """
-    contenders = [style for style in styles if style.name != REFERENCE_ARM]
     cols = 4
     rows = -(-len(METRICS) // cols)
     figure, axes = _figure(16, 2.6 * rows + 0.8, rows=rows, cols=cols)
@@ -289,7 +322,7 @@ def plot_differences(table: pd.DataFrame, styles: Sequence[ArmStyle], directory:
         ax.set_visible(False)
     for ax, metric in zip(axes.flat, METRICS):
         title, unit, better, scale = METRIC_LABELS[metric]
-        readings = table[table["metric"] == metric].set_index("arm")
+        readings = table[table["metric"] == metric].set_index(key)
         _interval_panel(
             ax,
             [
@@ -298,18 +331,35 @@ def plot_differences(table: pd.DataFrame, styles: Sequence[ArmStyle], directory:
                     *(
                         scale
                         * readings.loc[
-                            style.name, ["median_difference", "ci_low", "ci_high"]
+                            style.name, [estimate, "ci_low", "ci_high"]
                         ].to_numpy(dtype=float)
                     ),
                 )
-                for style in contenders
+                for style in styles
             ],
             reference=0.0,
-            reference_label=REFERENCE_ARM,
+            reference_label=reference_label,
         )
         ax.set_xlabel(unit, color=INK_SECONDARY, fontsize=8)
         side = f"; {BETTER_SIDE[better]}" if better else ""
-        _title(ax, title, f"minus {REFERENCE_ARM}, paired by trial{side}")
+        _title(ax, title, f"{subtitle}{side}")
+    return figure
+
+
+def plot_differences(table: pd.DataFrame, styles: Sequence[ArmStyle], directory: Path):
+    """One panel per reading: each arm's median paired difference from the reference.
+
+    Pairing by trial removes the spread between trials (universe and period)
+    that every arm shares, so the panels show only what the simulator changes.
+    """
+    figure = _metric_grid(
+        table,
+        [style for style in styles if style.name != REFERENCE_ARM],
+        key="arm",
+        estimate="median_difference",
+        reference_label=REFERENCE_ARM,
+        subtitle=f"minus {REFERENCE_ARM}, paired by trial",
+    )
     figure.suptitle(
         f"Rebalancing readings against {REFERENCE_ARM}: median paired difference "
         f"and 95 % bootstrap interval over trials",
@@ -318,6 +368,66 @@ def plot_differences(table: pd.DataFrame, styles: Sequence[ArmStyle], directory:
     )
     _device_legend(figure)
     return _save(figure, directory, "rebalancing_differences")
+
+
+def plot_effects(
+    effects: pd.DataFrame,
+    styles: Sequence[EffectStyle],
+    title: str,
+    name: str,
+    directory: Path,
+) -> list[Path]:
+    """One panel per reading: each effect's mean over trials.
+
+    ``effects`` is ``swap_effects`` or ``independence_effects`` of the
+    rebalancing readings; the panels are those of ``plot_differences``, with
+    each effect of ``styles`` as a row in place of an arm. ``title`` names
+    the effects in the figure's heading, and the figure is saved as ``name``.
+    """
+    figure = _metric_grid(
+        effects,
+        styles,
+        key="effect",
+        estimate="mean",
+        reference_label="no effect",
+        subtitle="mean over trials",
+    )
+    figure.suptitle(
+        f"{title} on the rebalancing readings: mean effect and 95 % bootstrap "
+        f"interval over trials",
+        color=INK,
+        fontsize=10,
+    )
+    _effect_legend(figure, styles)
+    return _save(figure, directory, name)
+
+
+def plot_mean_attribution(attribution: pd.DataFrame, directory: Path) -> list[Path]:
+    """One panel per reading: jointfm's difference from no_fit and its two parts.
+
+    ``attribution`` is ``mean_attribution`` of the rebalancing readings; the
+    panels are those of ``plot_differences``, with each part of
+    ``ATTRIBUTION_STYLES`` as a row in place of an arm, so a reading whose
+    total sits with one part shows which of JointFM's expected returns and
+    scenarios moves it.
+    """
+    figure = _metric_grid(
+        attribution,
+        ATTRIBUTION_STYLES,
+        key="part",
+        estimate="mean",
+        reference_label="no difference",
+        subtitle="mean over trials",
+    )
+    figure.suptitle(
+        f"Rebalancing readings of jointfm against {REFERENCE_ARM} split into "
+        "expected returns and scenarios: mean difference and 95 % bootstrap "
+        "interval over trials",
+        color=INK,
+        fontsize=10,
+    )
+    _effect_legend(figure, ATTRIBUTION_STYLES)
+    return _save(figure, directory, "rebalancing_mean_attribution")
 
 
 def plot_paths(frame: pd.DataFrame, styles: Sequence[ArmStyle], directory: Path):
@@ -366,20 +476,33 @@ def plot_paths(frame: pd.DataFrame, styles: Sequence[ArmStyle], directory: Path)
     return _save(figure, directory, "rebalancing_paths")
 
 
-def write_rebalancing_report(results_path: Path, output_dir: Path) -> list[Path]:
+def write_rebalancing_report(
+    results_path: Path, scenario_results: Path, output_dir: Path
+) -> list[Path]:
     """Compute the comparisons of a rebalancing results file and write its outputs.
+
+    ``scenario_results`` is the scenario-comparison results file of the same
+    trials (``rebalancing.scenario_results``), over whose next-day size curves
+    ``chosen_report`` draws the risk of the chosen portfolios; the curves it
+    draws are ``rebalancing_size_curves.csv``.
 
     Raises
     ------
     ValueError
         If fewer trials than the report needs have every arm's run, the
-        reference arm is missing, or the swap design or the expected-return
-        attribution is incomplete.
+        reference arm is missing, the swap design or the expected-return
+        attribution is incomplete, the independence control lacks its window
+        arm, or ``scenario_results`` does not hold every
+        backtested trial on the same prices, universes, and bounds
+        (``chosen_report.next_day_trials``).
     """
     frame, metadata = read_results(results_path)
     frame = complete_runs(frame, tuple(metadata.identity["arms"]))
+    scenario = next_day_trials(
+        scenario_results, metadata.identity, backtest_universes(frame)
+    )
     per_trial = per_trial_frame(frame)
-    styles = arm_styles(per_trial)
+    styles = simulator_styles(per_trial)
     table = comparisons(per_trial)
     tables = {
         "rebalancing_summary": summary(per_trial),
@@ -387,10 +510,20 @@ def write_rebalancing_report(results_path: Path, output_dir: Path) -> list[Path]
         "rebalancing_chosen_risk": chosen_risk(
             frame, metadata.identity["rebalancing"]["cvar"]["confidence"]
         ),
+        "rebalancing_size_curves": random_size_curves(scenario),
     }
-    design = swap_design(metadata.identity["arms"])
-    if design is not None:
-        tables["rebalancing_swap_effects"] = swap_effects(per_trial, METRICS, design)
+    effect_figures = []
+    for figures, design, effects in (
+        (SWAP_FIGURES, swap_design(metadata.identity["arms"]), swap_effects),
+        (
+            INDEPENDENCE_FIGURES,
+            independence_design(metadata.identity["arms"]),
+            independence_effects,
+        ),
+    ):
+        if design is not None:
+            tables[f"rebalancing_{figures[0]}"] = effects(per_trial, METRICS, design)
+            effect_figures.append(figures)
     attribution = mean_attribution_design(metadata.identity["arms"])
     if attribution is not None:
         tables["rebalancing_mean_attribution"] = mean_attribution(
@@ -404,6 +537,20 @@ def write_rebalancing_report(results_path: Path, output_dir: Path) -> list[Path]
         files.append(path)
     files += plot_differences(table, styles, output_dir)
     files += plot_paths(frame, styles, output_dir)
+    files += plot_chosen_risk(
+        tables["rebalancing_chosen_risk"],
+        tables["rebalancing_size_curves"],
+        simulator_styles(scenario),
+        styles,
+        output_dir,
+    )
+    for stem, title, effect_styles in effect_figures:
+        name = f"rebalancing_{stem}"
+        files += plot_effects(tables[name], effect_styles, title, name, output_dir)
+    if attribution is not None:
+        files += plot_mean_attribution(
+            tables["rebalancing_mean_attribution"], output_dir
+        )
     return files
 
 
@@ -421,7 +568,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     rebalancing = load_config(build_parser().parse_args(argv).config).rebalancing
-    outputs = write_rebalancing_report(rebalancing.output, rebalancing.report_dir)
+    outputs = write_rebalancing_report(
+        rebalancing.output, rebalancing.scenario_results, rebalancing.report_dir
+    )
     print(
         f"Rebalancing report finished: {len(outputs)} files in "
         f"{rebalancing.report_dir}."

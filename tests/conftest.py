@@ -87,8 +87,7 @@ class FakeJointFMClient:
         )
 
 
-@pytest.fixture()
-def fake_jointfm(monkeypatch):
+def _install_fake_jointfm(patch: pytest.MonkeyPatch) -> FakeJointFMClient:
     client = FakeJointFMClient()
 
     def from_env(**kwargs):
@@ -102,5 +101,78 @@ def fake_jointfm(monkeypatch):
     def import_fake_client():
         return module
 
-    monkeypatch.setattr(cvar_utils, "_import_jointfm_client", import_fake_client)
+    patch.setattr(cvar_utils, "_import_jointfm_client", import_fake_client)
     return client
+
+
+@pytest.fixture()
+def fake_jointfm(monkeypatch):
+    return _install_fake_jointfm(monkeypatch)
+
+
+@pytest.fixture(scope="module")
+def module_fake_jointfm():
+    """``fake_jointfm`` for a module whose fixtures run an experiment once.
+
+    The client stays installed until the module's last test has run.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        yield _install_fake_jointfm(patch)
+
+
+@pytest.fixture()
+def window_scenario_results():
+    """Run a config's scenario comparison with the window's arm alone.
+
+    The rebalancing report draws the chosen portfolios over the size curves of
+    the scenario results its config names; ``no_fit-cpu`` needs no service, so
+    it is the cheapest arm that writes them. The returned function takes the
+    config and returns its ``rebalancing.scenario_results``.
+    """
+    # Imported here: the library's tests run without the experiments extra.
+    from experiments.simulator_comparison.arms import WINDOW_ARM
+    from experiments.simulator_comparison.runner import run_experiment
+    from experiments.simulator_comparison.scores import (
+        PortfolioScores,
+        ScenarioScores,
+    )
+
+    def run(config):
+        portfolios = PortfolioScores(
+            config.portfolio_sizes, config.rebalancing.cvar, config.assets
+        )
+        window = config.model_copy(update={"arms": (WINDOW_ARM,)})
+        run_experiment(window, [ScenarioScores(), portfolios])
+        return config.rebalancing.scenario_results
+
+    return run
+
+
+@pytest.fixture()
+def saved_figures(monkeypatch):
+    """The texts of every figure the reports save, by figure name.
+
+    Each report module's ``_save`` is replaced by a recorder that keeps the
+    figure's texts (titles, tick labels, legend entries), so a test reads
+    which arms a figure names; nothing is written, which keeps the reports
+    fast, and the reports get back the paths they would have written.
+    """
+    # Imported here: the library's tests run without the experiments extra.
+    from matplotlib.text import Text
+
+    from experiments.simulator_comparison import (
+        chosen_report,
+        portfolio_report,
+        rebalancing_report,
+        report,
+    )
+
+    texts = {}
+
+    def record(figure, directory, name):
+        texts[name] = "\n".join(text.get_text() for text in figure.findobj(Text))
+        return [directory / f"{name}.png", directory / f"{name}.svg"]
+
+    for module in (report, portfolio_report, rebalancing_report, chosen_report):
+        monkeypatch.setattr(module, "_save", record)
+    return texts

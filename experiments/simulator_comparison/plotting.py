@@ -5,7 +5,13 @@
 
 Colors follow the simulator, so the CPU and GPU arm of one simulator share a
 hue; the device is the second channel: filled marks are CPU, hollow marks GPU,
-and every axis label names the arm. The ``no_fit`` reference is gray.
+and every axis label names the arm. The ``no_fit`` reference is gray. The
+per-arm figures draw the scenario simulators only (``simulator_styles``); each
+measurement arm is drawn in the figure that reads it. The figures of the
+dependence swap effects draw each effect in place of an arm
+(``EFFECT_STYLES``), against zero, and so do the figure of the expected-return
+attribution with each part (``ATTRIBUTION_STYLES``) and the figures of the
+independence control with its one effect (``INDEPENDENCE_STYLES``).
 """
 
 from collections.abc import Sequence
@@ -17,6 +23,9 @@ import pandas as pd
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator, NullLocator
+
+from .analysis import INDEPENDENCE_EFFECT, REFERENCE_ARM
+from .arms import DERIVED_DONORS, INDEPENDENT_ARM
 
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
@@ -83,6 +92,85 @@ class ArmStyle:
         return f"{self.fit_type} · {self.device}"
 
 
+@dataclass(frozen=True)
+class EffectStyle:
+    """How one effect is drawn in place of an arm: a swap effect or an attribution part."""
+
+    name: str
+    color: str
+    filled: bool
+    definition: str
+
+    @property
+    def inline_label(self) -> str:
+        return self.name
+
+
+# The effects of ``analysis.swap_effects`` in drawing order. The two main
+# effects and their interaction take categorical slots 1-3, validated
+# all-pairs; the construction check, which should read zero, is a hollow
+# dark gray that still separates from them under color-vision deficiency.
+EFFECT_STYLES = (
+    EffectStyle("marginals", "#2a78d6", True, "JointFM's marginals minus the window's"),
+    EffectStyle(
+        "dependence", "#eb6834", True, "JointFM's dependence minus the window's"
+    ),
+    EffectStyle(
+        "interaction",
+        "#1baf7a",
+        True,
+        "marginals' effect under JointFM's dependence minus under the window's",
+    ),
+    EffectStyle(
+        "construction",
+        INK_SECONDARY,
+        False,
+        "window corner minus no_fit, zero when the swap adds nothing",
+    ),
+)
+
+# The parts of ``analysis.mean_attribution`` in drawing order, the total above
+# the two parts that sum to it, in categorical slots 1-3.
+ATTRIBUTION_STYLES = (
+    EffectStyle("total", "#2a78d6", True, "jointfm minus no_fit"),
+    EffectStyle(
+        "expected_returns",
+        "#eb6834",
+        True,
+        "jointfm minus jointfm-historical, JointFM's expected returns",
+    ),
+    EffectStyle(
+        "scenarios",
+        "#1baf7a",
+        True,
+        "jointfm-historical minus no_fit, JointFM's scenarios",
+    ),
+)
+
+# The one effect of ``analysis.independence_effects``, in the control's color.
+INDEPENDENCE_STYLES = (
+    EffectStyle(
+        INDEPENDENCE_EFFECT,
+        SIMULATOR_COLORS[INDEPENDENT_ARM],
+        True,
+        f"{INDEPENDENT_ARM} minus no_fit, all dependence between assets removed",
+    ),
+)
+
+# (table and figure name stem, heading, styles) of the swap effects and of the
+# independence control, which both reports draw alike; the rebalancing report
+# prefixes the stem with ``rebalancing_``.
+SWAP_FIGURES = ("swap_effects", "Dependence swap effects", EFFECT_STYLES)
+INDEPENDENCE_FIGURES = (
+    "independence_control",
+    f"Independence control ({INDEPENDENT_ARM} minus {REFERENCE_ARM})",
+    INDEPENDENCE_STYLES,
+)
+
+# Either kind of drawn series: a simulator arm or an effect.
+Style = ArmStyle | EffectStyle
+
+
 def arm_styles(per_trial: pd.DataFrame) -> list[ArmStyle]:
     """Arms in simulator order, CPU before GPU."""
     arms = per_trial.groupby("arm")[["fit_type", "device"]].first()
@@ -95,6 +183,18 @@ def arm_styles(per_trial: pd.DataFrame) -> list[ArmStyle]:
         )
 
     return sorted(styles, key=order)
+
+
+def simulator_styles(per_trial: pd.DataFrame) -> list[ArmStyle]:
+    """The scenario simulators' styles of ``arm_styles``, which the per-arm figures draw.
+
+    The derived arms (``DERIVED_DONORS``) are measurement arms, each drawn
+    only in the figure that reads it, so they neither crowd the simulators'
+    panels nor set their axes.
+    """
+    return [
+        style for style in arm_styles(per_trial) if style.name not in DERIVED_DONORS
+    ]
 
 
 def _figure(width: float, height: float, rows: int = 1, cols: int = 1):
@@ -176,7 +276,7 @@ def _target_line(ax, target: float) -> None:
 
 def _interval_panel(
     ax,
-    rows: Sequence[tuple[ArmStyle, float, float, float]],
+    rows: Sequence[tuple[Style, float, float, float]],
     *,
     reference: float,
     reference_label: str,
@@ -228,14 +328,15 @@ def _log_axis(ax, positions: Sequence[int]) -> None:
     ax.grid(axis="x", color=GRID, linewidth=1)
 
 
-def _curves(ax, table: pd.DataFrame, x: str, styles: Sequence[ArmStyle]) -> None:
+def _curves(ax, table: pd.DataFrame, x: str, styles: Sequence[Style]) -> None:
     """Each arm's ``estimate`` over the column ``x`` of ``table``, on a log axis.
 
     ``table`` holds one row per (``x``, ``arm``) with ``estimate``, ``ci_low``,
-    and ``ci_high``. Each arm is a line through its estimates with a vertical
-    line across each interval; the arms at one position are spread apart by
-    ``ARM_OFFSET`` so their intervals do not overlap. Arms of ``styles`` that
-    ``table`` lacks are skipped.
+    and ``ci_high``; an effect stands in an ``arm`` row under its name. Each
+    arm is a line through its estimates with a vertical line across each
+    interval; the arms at one position are spread apart by ``ARM_OFFSET`` so
+    their intervals do not overlap. Arms of ``styles`` that ``table`` lacks
+    are skipped.
     """
     offsets = ARM_OFFSET ** (np.arange(len(styles)) - (len(styles) - 1) / 2)
     for offset, style in zip(offsets, styles):
@@ -291,7 +392,10 @@ def _device_legend(figure) -> None:
     )
 
 
-def _arm_legend(figure, styles: Sequence[ArmStyle]) -> None:
+def _marker_legend(
+    figure, entries: Sequence[tuple[str, bool, str]], ncols: int
+) -> None:
+    """A legend below the panels, one marker per (color, filled, label)."""
     handles = [
         Line2D(
             [],
@@ -299,20 +403,44 @@ def _arm_legend(figure, styles: Sequence[ArmStyle]) -> None:
             marker="o",
             linestyle="",
             markersize=7,
-            markerfacecolor=style.color if style.filled else SURFACE,
-            markeredgecolor=style.color,
+            markerfacecolor=color if filled else SURFACE,
+            markeredgecolor=color,
             markeredgewidth=MARKER_EDGE,
-            label=style.inline_label,
+            label=label,
         )
-        for style in styles
+        for color, filled, label in entries
     ]
     figure.legend(
         handles=handles,
         loc="outside lower center",
-        ncols=len(handles),
+        ncols=ncols,
         frameon=False,
         fontsize=8,
         labelcolor=INK_SECONDARY,
+    )
+
+
+def _arm_legend(figure, styles: Sequence[ArmStyle]) -> None:
+    _marker_legend(
+        figure,
+        [(style.color, style.filled, style.inline_label) for style in styles],
+        ncols=len(styles),
+    )
+
+
+# Effect definitions are too long for one legend row.
+EFFECT_LEGEND_COLUMNS = 2
+
+
+def _effect_legend(figure, styles: Sequence[EffectStyle]) -> None:
+    """Each effect's marker with what it measures."""
+    _marker_legend(
+        figure,
+        [
+            (style.color, style.filled, f"{style.name}: {style.definition}")
+            for style in styles
+        ],
+        ncols=EFFECT_LEGEND_COLUMNS,
     )
 
 

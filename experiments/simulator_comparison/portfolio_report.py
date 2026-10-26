@@ -3,15 +3,19 @@
 
 """Figures of the portfolio readings as curves over the portfolio size and horizon.
 
-``write_report`` calls them with the tables of ``portfolio_analysis``; they
-follow the shared look of ``plotting``.
+``write_report`` calls them with the tables of ``portfolio_analysis``, and
+with the effects on the portfolio readings when the results hold the
+dependence swap arms or the independence control; they follow the shared look
+of ``plotting``.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 from matplotlib.ticker import PercentFormatter
 
 from .analysis import REFERENCE_ARM
@@ -20,8 +24,10 @@ from .plotting import (
     INK,
     SURFACE,
     ArmStyle,
+    EffectStyle,
     _arm_legend,
     _curves,
+    _effect_legend,
     _figure,
     _save,
     _target_line,
@@ -55,6 +61,21 @@ READING_LABELS = {
     ),
 }
 PERCENT_READINGS = ("breach_05", "breach_01")
+# (title, unit) per portfolio reading of ``swap_effects`` and
+# ``independence_effects``, which difference the arms' own per-trial readings
+# rather than those ``size_curves`` derives.
+EFFECT_READING_LABELS = {
+    "breach_05": ("95 % VaR breach rate", "share of portfolio-days"),
+    "breach_01": ("99 % VaR breach rate", "share of portfolio-days"),
+    "crps": (
+        "Portfolio CRPS",
+        "portfolio trailing volatility × √h units; lower is better",
+    ),
+    "z2": (
+        "Squared standardized error",
+        "mean z²; above 0 means narrower scenarios",
+    ),
+}
 # A position's calibrated band spans this factor either side of it on the log axis.
 BAND_HALF_WIDTH = 1.2
 # Inches that keep the suptitle of a horizon figure with few sizes unclipped.
@@ -89,6 +110,31 @@ def _reading_panel(
     _curves(ax, cell, x, styles)
 
 
+def _size_grid(
+    curves: pd.DataFrame,
+    labels: dict[str, tuple[str, str]],
+    draw: Callable[[Axes, pd.DataFrame, str], None],
+) -> Figure:
+    """One panel per reading of ``labels`` and portfolio kind, over the size.
+
+    Rows are the readings, in ``labels`` order, columns the kinds in
+    ``curves``; ``draw`` draws the rows of ``curves`` of one kind and reading
+    on its panel.
+    """
+    kinds = _kinds(curves)
+    figure, axes = _figure(
+        5.5 * len(kinds), 3.6 * len(labels), rows=len(labels), cols=len(kinds)
+    )
+    for row, (reading, (title, unit)) in enumerate(labels.items()):
+        for column, kind in enumerate(kinds):
+            ax = axes[row, column]
+            cell = curves[(curves["kind"] == kind) & (curves["reading"] == reading)]
+            draw(ax, cell, reading)
+            ax.set_xlabel("assets per portfolio", fontsize=8)
+            _title(ax, f"{title} · {KIND_LABELS[kind]}", unit)
+    return figure
+
+
 def plot_portfolio_sizes(
     curves: pd.DataFrame, styles: Sequence[ArmStyle], directory: Path
 ) -> list[Path]:
@@ -99,19 +145,11 @@ def plot_portfolio_sizes(
     interval. The breach-rate panels shade the binomial band of a calibrated
     forecast and mark the nominal level.
     """
-    kinds = _kinds(curves)
-    readings = list(READING_LABELS)
-    figure, axes = _figure(
-        5.5 * len(kinds), 3.6 * len(readings), rows=len(readings), cols=len(kinds)
-    )
-    for row, reading in enumerate(readings):
-        title, unit = READING_LABELS[reading]
-        for column, kind in enumerate(kinds):
-            ax = axes[row, column]
-            cell = curves[(curves["kind"] == kind) & (curves["reading"] == reading)]
-            _reading_panel(ax, cell, "size", reading, styles)
-            ax.set_xlabel("assets per portfolio", fontsize=8)
-            _title(ax, f"{title} · {KIND_LABELS[kind]}", unit)
+
+    def draw(ax: Axes, cell: pd.DataFrame, reading: str) -> None:
+        _reading_panel(ax, cell, "size", reading, styles)
+
+    figure = _size_grid(curves, READING_LABELS, draw)
     figure.suptitle(
         "Portfolio readings over the portfolio size: point and 95 % bootstrap "
         "interval over trials",
@@ -120,6 +158,39 @@ def plot_portfolio_sizes(
     )
     _arm_legend(figure, styles)
     return _save(figure, directory, "portfolio_sizes")
+
+
+def plot_effect_sizes(
+    curves: pd.DataFrame,
+    styles: Sequence[EffectStyle],
+    title: str,
+    name: str,
+    directory: Path,
+) -> list[Path]:
+    """Every portfolio reading's effects over the portfolio size.
+
+    ``curves`` is ``effect_curves`` of the next day. The layout is that of
+    ``plot_portfolio_sizes``, with the readings of ``EFFECT_READING_LABELS``
+    as rows and each effect of ``styles`` as a line through its means with
+    its intervals, against zero. ``title`` names the effects in the figure's
+    heading, and the figure is saved as ``name``.
+    """
+
+    def draw(ax: Axes, cell: pd.DataFrame, reading: str) -> None:
+        if reading in PERCENT_READINGS:
+            ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+        _target_line(ax, 0.0)
+        _curves(ax, cell, "size", styles)
+
+    figure = _size_grid(curves, EFFECT_READING_LABELS, draw)
+    figure.suptitle(
+        f"{title} on the portfolio readings over the portfolio size: mean over "
+        f"trials and 95 % bootstrap interval; 0 is no effect",
+        color=INK,
+        fontsize=10,
+    )
+    _effect_legend(figure, styles)
+    return _save(figure, directory, name)
 
 
 def plot_portfolio_horizons(

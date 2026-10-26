@@ -84,10 +84,10 @@ There are many ways to contribute to the portfolio optimization developer exampl
    uv run pre-commit install
    ```
 
-   This installs the hooks so they run automatically before every `git commit`. `task setup` does this too, together with the full environment and the Jupyter kernel. To run them manually against all files at any time:
+   This installs the hooks so they run automatically before every `git commit`. `task setup` does this too, together with the full environment and the Jupyter kernel. To run the same hooks manually against all files at any time, the pytest suite included:
 
    ```bash
-   uv run pre-commit run --all-files
+   task pre-commit
    ```
 
    Or against only the files you've staged:
