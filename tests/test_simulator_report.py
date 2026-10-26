@@ -338,12 +338,16 @@ class TestRegimes:
         features = origin_features(prices, frame, EXPERIMENT)
         trial, dates = _origin_dates(prices, 0)
         position = trial.origins[0]
-        log_prices = np.log(prices[list(trial.assets)].to_numpy())
-        window = np.diff(
-            log_prices[position - EXPERIMENT["look_back"] : position + 1], axis=0
+        universe = prices[list(trial.assets)].to_numpy()
+
+        def simple_returns(rows):
+            return rows[1:] / rows[:-1] - 1
+
+        window = simple_returns(
+            universe[position - EXPERIMENT["look_back"] : position + 1]
         )
-        forward = np.diff(
-            log_prices[position : position + EXPERIMENT["forward"] + 1], axis=0
+        forward = simple_returns(
+            universe[position : position + EXPERIMENT["forward"] + 1]
         )
 
         def mean_correlation(returns):

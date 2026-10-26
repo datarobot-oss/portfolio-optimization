@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 DataRobot, Inc. and its affiliates. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Simulator-comparison configuration; experiments/simulator_comparison/config.py
+# describes every field. Paths are relative to the repository root; services
+# and GPUs come from .env, as for any user of the library.
+#
+# Twin of full.yaml that differs only in the base risk aversion and its results
+# files, high enough for the CVaR term rather than the expected returns to decide
+# the weights; only its rebalancing backtest (task experiments:rebalance) differs
+# from full.yaml's.
+
+prices: data/stock_data/sp500.csv                                # daily price table the trials draw assets and dates from
+output: results/simulator_comparison/full_risk_averse.parquet    # scenario-comparison results (Parquet)
+trials: 200                                                      # scenario-comparison trials, each one asset universe with its own forecast dates
+origins: 20                                                      # forecast dates per trial
+assets: 100                                                      # assets per trial universe
+look_back: 252                                                   # daily returns before each forecast date that the simulators fit
+origin_history: 731                                              # daily returns a forecast date needs before it; only the date draw reads it
+forward: 63                                                      # daily returns after each forecast date, read only by the scores
+num_scen: 50000                                                  # scenarios each simulator generates per forecast
+seed: 0                                                          # experiment seed; with the trial index it fixes assets, dates, and scenario seeds
+# jointfm runs on the device of the service .env selects; run the config again
+# with .env pointing at the other device's service to add that JointFM arm.
+# The swap arms and window-independent read their donors' scenarios.
+arms: [no_fit-cpu, gaussian-cpu, kde-gpu, jointfm, swap-jointfm-window, swap-window-jointfm, swap-window-window, window-independent]  # simulators compared, each as simulator-device
+portfolio_sizes: [1, 2, 5, 10, 25, 50, 100]                      # assets per scored portfolio
+horizons: [1, 5, 21, 63]                                         # trading days after each forecast date at which every arm is scored
+# Rebalancing backtest of the same trials' universes (task experiments:rebalance).
+rebalancing:                                                     # rebalancing backtest settings
+  output: results/simulator_comparison/full_risk_averse_rebalancing.parquet  # rebalancing results (Parquet)
+  arms: [no_fit-cpu, gaussian-cpu, kde-gpu, jointfm, swap-jointfm-window, swap-window-jointfm, swap-window-window, jointfm-historical, window-independent]  # simulators backtested
+  trials: 200                                                    # backtest trials; trial i trades the assets of scenario trial i
+  trading_days: 378                                              # trading days in each trial's randomly drawn trading window
+  look_forward_window: 21                                        # trading days per step between re-optimization decisions
+  # Calendar days, as rebalance_portfolio counts the look-back window.
+  look_back_days: 365                                            # calendar days of history each optimization fits
+  trigger: every_step                                            # when to re-optimize after a step: every_step or pct_change
+  pct_change_threshold: -0.005                                   # loss threshold of the pct_change trigger; every_step ignores it
+  transaction_cost: 0.001                                        # cost as a fraction of turnover
+  risk_free_rates: data/rates/dtb3.csv                           # dated annual rates that cash earns (task data:risk-free-rates)
+  solver: CUOPT                                                  # solver of every optimization: CUOPT (GPU) or CLARABEL (CPU)
+  cvar:                                                          # CVaR optimization constraints
+    w_min: -0.3                                                  # lower bound of each asset weight; below 0 allows shorts
+    w_max: 0.8                                                   # upper bound of each asset weight
+    c_min: 0.1                                                   # lower bound of the cash weight
+    c_max: 0.2                                                   # upper bound of the cash weight
+    L_tar: 1.6                                                   # upper bound of gross exposure, the sum of absolute weights
+    T_tar: 0.5                                                   # upper bound of turnover per re-optimization
+    confidence: 0.95                                             # CVaR level; CVaR averages the worst 1 - confidence of scenarios
+    risk_aversion: 100.0                                         # base weight of CVaR against expected return, scaled once per trial

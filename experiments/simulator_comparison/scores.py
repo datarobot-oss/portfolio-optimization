@@ -5,7 +5,7 @@
 
 Every score treats the scenario set as the discrete, equally weighted
 distribution the optimizer receives, so it measures what the optimizer sees.
-Returns are log returns over the horizon's ``h`` trading days after the
+Returns are simple returns over the horizon's ``h`` trading days after the
 origin (``horizons``). CRPS, the energy score, and the variogram score are
 taken in units of each asset's trailing realized daily volatility times
 ``sqrt(h)``, so calm and volatile assets weigh alike in the average over
@@ -26,7 +26,7 @@ from .portfolios import (
     PORTFOLIO_STREAM,
     draw_portfolios,
     portfolio_cells,
-    portfolio_log_returns,
+    portfolio_returns,
 )
 from .trials import OriginInputs
 
@@ -243,8 +243,8 @@ def _cover_column(level: float) -> str:
 class ScenarioScores:
     """Readings of the Return-input backtest, plus PIT and energy score, per row.
 
-    Every reading compares the scenarios of the log return over one horizon of
-    ``h`` days with the realized ``h``-day log return. The *horizon scale* of
+    Every reading compares the scenarios of the simple return over one horizon
+    of ``h`` days with the realized ``h``-day simple return. The *horizon scale* of
     an asset is its trailing realized daily volatility times ``sqrt(h)``.
     Columns:
 
@@ -268,11 +268,11 @@ class ScenarioScores:
       correlations at every horizon, which equal the h-day correlations of
       independent days; 63 forward days cannot estimate an h-day correlation.
     - ``ew_var_exceeded``: 1 when the equal-weight portfolio's realized h-day
-      log return falls below its scenarios' ``VAR_LEVEL`` quantile; ~0.05 on
+      return falls below its scenarios' ``VAR_LEVEL`` quantile; ~0.05 on
       average.
     - ``mean_correlation``: correlation across assets of the arm's expected
       returns, the next-day ``CvarData.mean`` its rebalancing runs optimize
-      on, with the realized h-day log returns
+      on, with the realized h-day returns
       (``expected_return_correlation``). It scores the expected returns, which
       no other reading sees; every arm on the window's mean reads the same.
     """
@@ -367,8 +367,8 @@ class ScenarioScores:
         )
 
         weights = np.full(samples.shape[1], 1.0 / samples.shape[1])
-        portfolio = np.log(np.exp(samples) @ weights)
-        realized_portfolio = np.log(np.exp(realized) @ weights)
+        portfolio = samples @ weights
+        realized_portfolio = realized @ weights
         scores["ew_var_exceeded"] = float(
             realized_portfolio < np.quantile(portfolio, VAR_LEVEL)
         )
@@ -412,7 +412,7 @@ class PortfolioScores:
     cell's subsets:
 
     - ``portfolio_<kind>_<size>_breach_05``, ``..._breach_01``: share of
-      portfolios whose realized h-day log return falls below their scenarios'
+      portfolios whose realized h-day return falls below their scenarios'
       5 % and 1 % quantile, the value at risk; the level on average.
     - ``..._crps``: sample CRPS in units of the portfolio's trailing realized
       daily volatility times ``sqrt(h)``.
@@ -484,8 +484,7 @@ class PortfolioScores:
         ------
         ValueError
             If the look-back window is shorter than ``TRAILING_STD_WINDOW``,
-            the forward window holds fewer than ``horizon`` returns, or a
-            portfolio loses its whole value in a scenario.
+            or the forward window holds fewer than ``horizon`` returns.
         """
         window = inputs.returns_dict["returns"].to_numpy()
         if len(window) < TRAILING_STD_WINDOW:
@@ -500,11 +499,11 @@ class PortfolioScores:
             PORTFOLIO_SUBSETS,
             self.bounds,
         )
-        scenarios = portfolio_log_returns(samples, weights)
-        realized = portfolio_log_returns(
+        scenarios = portfolio_returns(samples, weights)
+        realized = portfolio_returns(
             inputs.realized(horizon).to_numpy()[None, :], weights
         )[:, 0]
-        scale = portfolio_log_returns(window[-TRAILING_STD_WINDOW:], weights).std(
+        scale = portfolio_returns(window[-TRAILING_STD_WINDOW:], weights).std(
             axis=1
         ) * np.sqrt(horizon)
 

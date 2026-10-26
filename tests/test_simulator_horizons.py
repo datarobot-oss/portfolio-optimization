@@ -28,7 +28,7 @@ ASSETS = 3
 
 @pytest.fixture()
 def returns_dict():
-    """A short random-walk window's log returns, as calculate_returns builds them."""
+    """A short random-walk window's simple returns, as calculate_returns builds them."""
     rng = np.random.default_rng(4)
     log_prices = np.cumsum(rng.normal(0.0, 0.01, size=(WINDOW + 1, ASSETS)), axis=0)
     prices = pd.DataFrame(
@@ -60,8 +60,8 @@ def test_next_day_is_the_arms_own_scenarios(returns_dict, name):
 
 
 @pytest.mark.parametrize("name", ["gaussian-cpu", "kde-cpu"])
-def test_multi_day_sums_independent_daily_draws(returns_dict, name):
-    """An h-day scenario sums the first h daily draws, each under its day seed."""
+def test_multi_day_compounds_independent_daily_draws(returns_dict, name):
+    """An h-day scenario compounds the first h daily draws, each under its day seed."""
     scenarios = horizon_scenarios(
         ARMS_BY_NAME[name],
         returns_dict,
@@ -70,8 +70,10 @@ def test_multi_day_sums_independent_daily_draws(returns_dict, name):
         horizons=HORIZONS,
     )
     days = [_one_day(name, returns_dict, day_seed(SEED, d)) for d in range(1, 6)]
-    np.testing.assert_allclose(scenarios[3], sum(days[:3]))
-    np.testing.assert_allclose(scenarios[5], sum(days))
+    np.testing.assert_allclose(
+        scenarios[3], np.prod(1 + np.stack(days[:3]), axis=0) - 1
+    )
+    np.testing.assert_allclose(scenarios[5], np.prod(1 + np.stack(days), axis=0) - 1)
     assert set(scenarios) == set(HORIZONS)
 
 
@@ -87,14 +89,16 @@ def test_no_fit_multi_day_resamples_the_window(returns_dict):
     window = returns_dict["returns"].to_numpy()
     rng = np.random.default_rng([SEED, HORIZON_STREAM])
     rows = [rng.integers(0, WINDOW, NUM_SCEN) for _ in range(5)]
-    np.testing.assert_allclose(scenarios[3], sum(window[r] for r in rows[:3]))
-    np.testing.assert_allclose(scenarios[5], sum(window[r] for r in rows))
+    draws = np.stack([window[r] for r in rows])
+    np.testing.assert_allclose(scenarios[3], np.prod(1 + draws[:3], axis=0) - 1)
+    np.testing.assert_allclose(scenarios[5], np.prod(1 + draws, axis=0) - 1)
     assert scenarios[1].shape == (WINDOW, ASSETS)
     assert scenarios[5].shape == (NUM_SCEN, ASSETS)
 
 
 def test_gaussian_covariance_grows_with_the_horizon(returns_dict):
-    """Summing h gaussian days scales mean and covariance by h."""
+    """Compounding h independent gaussian days compounds the mean and scales
+    the covariance by about h, up to terms of order variance squared."""
     num_scen = 20_000
     scenarios = horizon_scenarios(
         ARMS_BY_NAME["gaussian-cpu"],
@@ -109,13 +113,14 @@ def test_gaussian_covariance_grows_with_the_horizon(returns_dict):
     )
     np.testing.assert_allclose(
         scenarios[8].mean(axis=0),
-        8 * np.asarray(returns_dict["mean"]),
+        (1 + np.asarray(returns_dict["mean"])) ** 8 - 1,
         atol=4 * np.sqrt(8 * covariance.max() / num_scen),
     )
 
 
 def test_jointfm_answers_every_horizon_in_one_request(returns_dict, fake_jointfm):
-    """JointFM's h-day scenario is its forecast log price at h minus the last one."""
+    """JointFM's h-day scenario is its forecast log price at h minus the last
+    one, as a simple return."""
     fake_jointfm.envelope.n_input = 1000
     scenarios = horizon_scenarios(
         ARMS_BY_NAME["jointfm-cpu"],
@@ -130,7 +135,9 @@ def test_jointfm_answers_every_horizon_in_one_request(returns_dict, fake_jointfm
     assert call["seed"] == SEED
     log_returns = call["samples"] - call["history"].iloc[-1].to_numpy()
     for index, horizon in enumerate(HORIZONS):
-        np.testing.assert_allclose(scenarios[horizon], log_returns[:, index, :])
+        np.testing.assert_allclose(
+            scenarios[horizon], np.expm1(log_returns[:, index, :])
+        )
 
 
 def test_next_day_alone_draws_nothing_more(returns_dict, monkeypatch):
@@ -163,4 +170,30 @@ def test_horizons_must_start_at_the_next_day_and_increase(returns_dict, horizons
             num_scen=NUM_SCEN,
             seed=SEED,
             horizons=horizons,
+        )
+
+
+def test_log_returns_are_refused(returns_dict):
+    """Compounding needs simple returns, so a window of log returns is refused."""
+    with pytest.raises(ValueError, match="compound simple returns"):
+        horizon_scenarios(
+            ARMS_BY_NAME["gaussian-cpu"],
+            {**returns_dict, "return_type": "LOG"},
+            num_scen=NUM_SCEN,
+            seed=SEED,
+            horizons=HORIZONS,
+        )
+
+
+def test_total_loss_in_a_daily_draw_is_refused(returns_dict):
+    """A one-day return of -100 % is a zero price, which cannot compound."""
+    window = returns_dict["returns"].copy()
+    window.iloc[:, 0] = -1.0
+    with pytest.raises(ValueError, match="cannot compound"):
+        horizon_scenarios(
+            ARMS_BY_NAME["no_fit-cpu"],
+            {**returns_dict, "returns": window},
+            num_scen=NUM_SCEN,
+            seed=SEED,
+            horizons=HORIZONS,
         )

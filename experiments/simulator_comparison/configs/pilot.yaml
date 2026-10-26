@@ -11,19 +11,20 @@ trials: 20
 origins: 2
 assets: 100
 look_back: 252
-origin_history: 252
+origin_history: 731
 forward: 63
 num_scen: 10000
 seed: 0
 # jointfm runs on the device of the service .env selects; run the config again
 # with .env pointing at the other device's service to add that JointFM arm.
-arms: [no_fit-cpu, gaussian-cpu, kde-gpu, jointfm]
+# The swap arms and window-independent read their donors' scenarios.
+arms: [no_fit-cpu, gaussian-cpu, kde-gpu, jointfm, swap-jointfm-window, swap-window-jointfm, swap-window-window, window-independent]
 portfolio_sizes: [1, 2, 5, 10, 25, 50, 100]
 horizons: [1, 5, 21, 63]
 # Rebalancing backtest of the same trials' universes (task experiments:rebalance).
 rebalancing:
   output: results/simulator_comparison/pilot_rebalancing.parquet
-  arms: [no_fit-cpu, gaussian-cpu, kde-gpu, jointfm]
+  arms: [no_fit-cpu, gaussian-cpu, kde-gpu, jointfm, swap-jointfm-window, swap-window-jointfm, swap-window-window, jointfm-historical, window-independent]
   trials: 20
   trading_days: 378
   look_forward_window: 21

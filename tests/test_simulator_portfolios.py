@@ -13,7 +13,7 @@ from experiments.simulator_comparison.portfolios import (
     draw_portfolios,
     feasible_kinds,
     portfolio_cells,
-    portfolio_log_returns,
+    portfolio_returns,
 )
 
 # The bounds of the shipped configs.
@@ -117,16 +117,18 @@ class TestDraws:
 
 
 class TestReturns:
-    def test_fully_invested_portfolio_compounds_its_assets(self):
+    def test_portfolio_return_is_the_weighted_sum_of_asset_returns(self):
         rng = np.random.default_rng(3)
-        log_returns = rng.normal(0.0, 0.02, size=(100, 4))
+        returns = rng.normal(0.0, 0.02, size=(100, 4))
         weights = np.array([[0.25, 0.25, 0.25, 0.25], [0.7, 0.0, 0.3, 0.0]])
-        np.testing.assert_allclose(
-            portfolio_log_returns(log_returns, weights),
-            np.log(np.exp(log_returns) @ weights.T).T,
-        )
+        cash = 1 - weights.sum(axis=1, keepdims=True)
+        # Each position's value moves with its asset; cash keeps its value.
+        values = (weights[:, None, :] * (1 + returns)).sum(axis=2) + cash
+        np.testing.assert_allclose(portfolio_returns(returns, weights), values - 1)
 
-    def test_total_loss_is_refused(self):
+    def test_short_position_can_lose_more_than_the_capital(self):
+        """Short 1.0 of an asset that triples while the long side is flat."""
         weights = np.array([[2.0, -1.0]])
-        with pytest.raises(ValueError, match="-100 %"):
-            portfolio_log_returns(np.array([[-5.0, 1.0]]), weights)
+        np.testing.assert_allclose(
+            portfolio_returns(np.array([[0.0, 2.0]]), weights), [[-2.0]]
+        )

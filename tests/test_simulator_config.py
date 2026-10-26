@@ -18,8 +18,16 @@ def _shipped(name):
     return yaml.safe_load((CONFIG_DIR / name).read_text())
 
 
+# Each set runs its base config and three twins (task experiments:pilot, :full).
+SETS = ["pilot", "full"]
+TWINS = ["next_day", "long_history", "risk_averse"]
+
+
 @pytest.mark.parametrize(
-    "name", ["pilot.yaml", "full.yaml", "full_long_history.yaml", "timing.yaml"]
+    "name",
+    [f"{base}.yaml" for base in SETS]
+    + [f"{base}_{twin}.yaml" for base in SETS for twin in TWINS]
+    + ["timing.yaml"],
 )
 def test_shipped_configs_are_valid(name):
     config = load_config(CONFIG_DIR / name)
@@ -27,14 +35,44 @@ def test_shipped_configs_are_valid(name):
     assert config.report_dir.name == f"{config.output.stem}_report"
 
 
-def test_long_history_twin_differs_only_in_look_back_and_outputs():
-    full = _shipped("full.yaml")
-    twin = _shipped("full_long_history.yaml")
-    assert twin["look_back"] > full["look_back"]
-    assert twin["look_back"] <= full["origin_history"]
-    for values in (full, twin):
-        del values["look_back"], values["output"], values["rebalancing"]["output"]
-    assert twin == full
+def _without_outputs(values):
+    del values["output"], values["rebalancing"]["output"]
+    return values
+
+
+@pytest.mark.parametrize("base_name", SETS)
+def test_long_history_twin_differs_only_in_look_back_and_outputs(base_name):
+    base = _shipped(f"{base_name}.yaml")
+    twin = _shipped(f"{base_name}_long_history.yaml")
+    assert twin["look_back"] > base["look_back"]
+    assert twin["look_back"] <= base["origin_history"]
+    for values in (base, twin):
+        del values["look_back"]
+    assert _without_outputs(twin) == _without_outputs(base)
+
+
+@pytest.mark.parametrize("base_name", SETS)
+def test_next_day_twin_differs_only_in_horizons_and_outputs(base_name):
+    """The twin's next day is a next-day-only request, read against its base's."""
+    base = _shipped(f"{base_name}.yaml")
+    twin = _shipped(f"{base_name}_next_day.yaml")
+    assert twin["horizons"] == [1]
+    assert base["horizons"][0] == 1 and len(base["horizons"]) > 1
+    for values in (base, twin):
+        del values["horizons"]
+    assert _without_outputs(twin) == _without_outputs(base)
+
+
+@pytest.mark.parametrize("base_name", SETS)
+def test_risk_averse_twin_differs_only_in_risk_aversion_and_outputs(base_name):
+    base = _shipped(f"{base_name}.yaml")
+    twin = _shipped(f"{base_name}_risk_averse.yaml")
+    base_cvar = base["rebalancing"]["cvar"]
+    twin_cvar = twin["rebalancing"]["cvar"]
+    assert twin_cvar["risk_aversion"] > base_cvar["risk_aversion"]
+    for cvar in (base_cvar, twin_cvar):
+        del cvar["risk_aversion"]
+    assert _without_outputs(twin) == _without_outputs(base)
 
 
 def test_every_field_is_required():

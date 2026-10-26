@@ -252,7 +252,13 @@ def test_cash_earns_the_risk_free_rates(tmp_path, prices_path):
         )
     )
     growth = (1 + earning["total_return"]) / (1 + without["total_return"])
-    assert growth.iloc[0] == pytest.approx(1.5 ** (0.5 * TRADING_DAYS / 252), rel=1e-8)
+    daily_cash = 1.5 ** (1 / 252) - 1
+    # Simple returns add the cash weight's return to the assets' on each day, so
+    # the cash factor divides out of the two runs only up to a cross term of
+    # order cash return times asset return.
+    assert growth.iloc[0] == pytest.approx(
+        (1 + 0.5 * daily_cash) ** TRADING_DAYS, rel=1e-4
+    )
 
 
 def test_other_risk_free_rates_are_refused(tmp_path, prices_path):

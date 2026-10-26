@@ -223,10 +223,10 @@ A YAML file under [`experiments/simulator_comparison/configs/`](experiments/simu
 
 ```bash
 task setup                                   # reconcile uv.lock, install everything the tasks use, the pre-commit hooks, and the Jupyter kernel
-task experiments:all                         # run and report everything of full.yaml, resuming its results
+task experiments:pilot                       # every experiment at a small size, resuming its results
+task experiments:full                        # every experiment at full size, resuming its results
+task experiments:all                         # run and report everything of full.yaml alone, resuming its results
 task experiments:fresh                       # delete full.yaml's outputs, run and report everything
-task experiments:pilot                       # experiments:all of the short configs/pilot.yaml
-task experiments:pilot-fresh                 # delete pilot.yaml's outputs, run and report everything
 task experiments:run CONFIG=experiments/simulator_comparison/configs/full.yaml
 task experiments:report CONFIG=experiments/simulator_comparison/configs/full.yaml
 task experiments:test                        # CPU tests, no GPU or JointFM service needed
@@ -237,8 +237,10 @@ task data:risk-free-rates                    # download the T-bill rates the reb
 | --- | --- |
 | `setup` | Runs `uv lock`, which changes `uv.lock` only where `pyproject.toml` changed and keeps every other pin, then installs the locked environment with the `CUDA_EXTRA`, `jointfm`, and `experiments` extras and the `dev` and `notebooks` groups. It reports whether `uv.lock` has uncommitted changes. |
 | `lock:upgrade` | Moves every pin in `uv.lock` to the newest version `pyproject.toml` allows, installs it, and runs `experiments:test`. Run it deliberately, between experiments whose results are compared, and commit `uv.lock` once the tests and a pilot run pass. |
-| `experiments:pilot` | Runs `experiments:all` on a short config (default `pilot.yaml`) to measure cost per arm and noise before sizing the full run |
-| `experiments:pilot-fresh` | Deletes every output of a config (default `pilot.yaml`), then runs `experiments:pilot` from scratch |
+| `experiments:pilot` | Runs every experiment at a small size: `pilot.yaml` and its next-day, long-history, and risk-averse twins, with every report and the history comparison, to measure cost per arm and noise before the full run. Rerunning resumes every results file. |
+| `experiments:pilot-fresh` | Deletes every output of `experiments:pilot`, then runs it from scratch |
+| `experiments:full` | Runs every experiment at full size: `full.yaml` and its three twins, as `experiments:pilot` does for the pilot set. Rerunning resumes every results file. |
+| `experiments:full-fresh` | Deletes every output of `experiments:full`, then runs it from scratch |
 | `experiments:run` | Runs a config (default `full.yaml`). Rerunning resumes its results file, and a larger `trials` extends it. |
 | `experiments:report` | Writes the tables and plots of a config's results. `EXCLUDE` leaves out arms, for example one whose session is still running (`EXCLUDE=jointfm-cpu`). |
 | `experiments:rebalance` | Runs a config's rebalancing backtests (each trial's universe, once per simulator) and writes their report: returns, drawdown, Sharpe, Sortino, and Calmar ratios, turnover |

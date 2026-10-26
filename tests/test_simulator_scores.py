@@ -11,9 +11,14 @@ from scipy.spatial.distance import cdist
 from scipy.stats import norm
 
 from experiments.simulator_comparison.config import CvarConfig
+from experiments.simulator_comparison.portfolios import (
+    PORTFOLIO_STREAM,
+    draw_portfolios,
+)
 from experiments.simulator_comparison.scores import (
     PIT_BINS,
     PORTFOLIO_CRPS,
+    PORTFOLIO_SUBSETS,
     TRAILING_STD_WINDOW,
     PortfolioScores,
     ScenarioScores,
@@ -239,7 +244,7 @@ class TestScenarioScores:
         samples = rng.multivariate_normal(
             np.zeros(4), horizon * window.cov().to_numpy(), size=500
         )
-        outcome = forward.iloc[:horizon].sum().to_frame().T
+        outcome = ((1 + forward.iloc[:horizon]).prod() - 1).to_frame().T
         collapsed = pd.concat([outcome, forward.iloc[horizon:]])
         at_horizon = ScenarioScores()(
             _inputs(window, forward), horizon, samples, _mean(window)
@@ -330,9 +335,7 @@ class TestPortfolioScores:
         scaled = measurement(
             _inputs(2 * window, 2 * forward), 1, 2 * samples, _mean(window)
         )
-        # Simple returns compound, so doubling log returns scales a
-        # portfolio's returns only nearly in proportion.
-        assert scaled[PORTFOLIO_CRPS] == pytest.approx(base[PORTFOLIO_CRPS], rel=0.02)
+        assert scaled[PORTFOLIO_CRPS] == pytest.approx(base[PORTFOLIO_CRPS])
 
     def test_horizon_scores_hold_the_weights_over_the_h_day_outcome(self, returns):
         """At horizon h a portfolio's outcome is its buy-and-hold h-day return,
@@ -342,7 +345,7 @@ class TestPortfolioScores:
         rng = np.random.default_rng(13)
         samples = rng.normal(0.0, 0.02, size=(400, 4))
         measurement = PortfolioScores((1, 2, 4), BOUNDS, 4)
-        outcome = forward.iloc[:horizon].sum().to_frame().T
+        outcome = ((1 + forward.iloc[:horizon]).prod() - 1).to_frame().T
         at_horizon = measurement(
             _inputs(window, forward), horizon, samples, _mean(window)
         )
@@ -350,14 +353,30 @@ class TestPortfolioScores:
             _inputs(np.sqrt(horizon) * window, outcome), 1, samples, _mean(window)
         )
         for kind, size in measurement.cells:
-            for reading in ("breach_05", "breach_01", "z2"):
+            for reading in ("breach_05", "breach_01", "crps", "z2"):
                 column = cell_column(kind, size, reading)
                 assert at_horizon[column] == pytest.approx(next_day[column])
-        # Simple returns compound, so scaling log returns scales a portfolio's
-        # trailing volatility only nearly in proportion.
-        assert at_horizon[PORTFOLIO_CRPS] == pytest.approx(
-            next_day[PORTFOLIO_CRPS], rel=0.02
+
+    def test_short_losing_more_than_the_capital_is_scored(self, returns):
+        """A short position's loss has no floor, so a long-short portfolio can
+        lose more than its capital in a scenario, and the scores still read it."""
+        window, forward = returns.iloc[:70], returns.iloc[70:]
+        rng = np.random.default_rng(14)
+        samples = rng.normal(0.0, 0.01, size=(400, 4))
+        # In row k asset k gains 5000 % while every other asset loses 90 %.
+        samples[:4] = np.where(np.eye(4, dtype=bool), 50.0, -0.9)
+        measurement = PortfolioScores((4,), BOUNDS, 4)
+        inputs = _inputs(window, forward)
+        weights = draw_portfolios(
+            np.random.default_rng([inputs.seed, PORTFOLIO_STREAM]),
+            4,
+            measurement.cells,
+            PORTFOLIO_SUBSETS,
+            BOUNDS,
         )
+        assert (weights @ samples.T).min() < -1
+        scores = measurement(inputs, 1, samples, _mean(window))
+        assert all(np.isfinite(value) for value in scores.values())
 
     def test_too_weak_correlation_breaches_more_as_portfolios_grow(self):
         rng = np.random.default_rng(10)

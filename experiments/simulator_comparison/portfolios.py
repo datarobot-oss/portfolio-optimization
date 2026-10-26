@@ -192,31 +192,24 @@ def draw_portfolios(
     return weights
 
 
-def portfolio_log_returns(log_returns: np.ndarray, weights: np.ndarray) -> np.ndarray:
-    """Log return of each portfolio for each row of asset log returns.
+def portfolio_returns(returns: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    """Simple return of each portfolio for each row of asset simple returns.
 
     A portfolio's simple return is its weighted sum of the assets' simple
     returns; cash earns nothing, which shifts a day's scenarios and its
-    outcome alike.
+    outcome alike. A short position's loss has no floor, so a long-short
+    portfolio can lose more than its capital, a return below -100 %.
 
     Parameters
     ----------
-    log_returns : np.ndarray
-        Asset log returns, shape ``(rows, n_assets)``.
+    returns : np.ndarray
+        Asset simple returns, shape ``(rows, n_assets)``.
     weights : np.ndarray
         Portfolio weights, shape ``(portfolios, n_assets)``.
 
     Returns
     -------
     np.ndarray
-        Portfolio log returns, shape ``(portfolios, rows)``.
-
-    Raises
-    ------
-    ValueError
-        If a portfolio loses its whole value, where the log return is undefined.
+        Portfolio simple returns, shape ``(portfolios, rows)``.
     """
-    simple = weights @ np.expm1(log_returns).T
-    if (simple <= -1).any():
-        raise ValueError("A portfolio return reaches -100 %; its log is undefined.")
-    return np.log1p(simple)
+    return weights @ np.asarray(returns).T

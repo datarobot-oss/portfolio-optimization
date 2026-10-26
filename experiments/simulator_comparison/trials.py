@@ -17,7 +17,10 @@ import pandas as pd
 from portfolio_optimization.settings import ReturnsComputeSettings
 from portfolio_optimization.utils import calculate_returns
 
-RETURNS_SETTINGS = ReturnsComputeSettings(return_type="LOG", freq=1)
+# Simple returns aggregate across positions, so portfolio returns, the optimizer's
+# CVaR, and the backtest's values hold for short positions; JointFM still
+# forecasts log prices and converts (generate_horizon_samples_jointfm).
+RETURNS_SETTINGS = ReturnsComputeSettings(return_type="LINEAR", freq=1)
 
 
 @dataclass(frozen=True)
@@ -58,8 +61,8 @@ class OriginInputs:
         The window's returns as ``calculate_returns`` builds them for the
         optimizer; ``generate_cvar_data`` adds ``cvar_data`` to a copy.
     forward : pd.DataFrame
-        Log returns of the rows after the origin, oldest first. Only scoring
-        reads them; no simulator sees them.
+        Daily simple returns of the rows after the origin, oldest first. Only
+        scoring reads them; no simulator sees them.
     seed : int
         Scenario seed passed to every arm's simulator.
     """
@@ -70,7 +73,10 @@ class OriginInputs:
     seed: int
 
     def realized(self, horizon: int) -> pd.Series:
-        """Log return of every asset over the next ``horizon`` rows, the outcome.
+        """Simple return of every asset over the next ``horizon`` rows, the outcome.
+
+        The daily returns compound: ``prod(1 + r) - 1``, the price ``horizon``
+        rows after the origin over the origin's price, minus one.
 
         Raises
         ------
@@ -82,7 +88,7 @@ class OriginInputs:
                 f"A {horizon}-day outcome needs {horizon} forward returns; the "
                 f"origin keeps {len(self.forward)}."
             )
-        return self.forward.iloc[:horizon].sum()
+        return (1 + self.forward.iloc[:horizon]).prod() - 1
 
 
 def draw_trial(
@@ -189,8 +195,8 @@ def origin_inputs(
     ------
     ValueError
         If ``calculate_returns`` dropped an asset (a missing price), if the
-        window does not hold ``look_back`` returns, or if a return is not
-        finite (a non-positive price).
+        window does not hold ``look_back`` returns, or if a price of the
+        window or the forward rows is missing or not positive.
     """
     universe = prices[list(trial.assets)]
     returns_dict = calculate_returns(
@@ -209,21 +215,17 @@ def origin_inputs(
             f"Trial {trial.index} window ending {prices.index[origin]} holds "
             f"{len(window)} returns, expected {look_back}."
         )
-    forward_returns = (
-        np.log(universe.iloc[origin : origin + forward + 1]).diff().iloc[1:]
-    )
-    if not (
-        np.isfinite(window.to_numpy()).all()
-        and np.isfinite(forward_returns.to_numpy()).all()
+    if not (universe.iloc[origin - look_back : origin + forward + 1] > 0).all(
+        axis=None
     ):
         raise ValueError(
             f"Trial {trial.index} window ending {prices.index[origin]} has a "
-            f"non-finite log return: a price is not positive."
+            f"missing or non-positive price."
         )
     return OriginInputs(
         origin=prices.index[origin],
         returns_dict=returns_dict,
-        forward=forward_returns,
+        forward=universe.iloc[origin : origin + forward + 1].pct_change().iloc[1:],
         seed=scenario_seed(seed, trial.index, origin),
     )
 

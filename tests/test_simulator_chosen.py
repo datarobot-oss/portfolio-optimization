@@ -26,15 +26,15 @@ TICKERS = ("A", "B")
 SCENARIOS = 21
 
 
-def _portfolio_log_return(log_returns, weights):
-    """The definition: log of one plus the weighted simple returns, cash earning nothing."""
-    return np.log1p(np.expm1(np.asarray(log_returns)) @ np.asarray(weights))
+def _portfolio_return(returns, weights):
+    """The definition: the weighted simple returns, cash earning nothing."""
+    return np.asarray(returns) @ np.asarray(weights)
 
 
 def _scenarios():
     """Asset A's simple returns step by 1 % from -10 %; asset B never moves."""
     simple = (np.arange(SCENARIOS) - 10) / 100
-    return np.column_stack([np.log1p(simple), np.zeros(SCENARIOS)])
+    return np.column_stack([simple, np.zeros(SCENARIOS)])
 
 
 def test_effective_holdings_counts_equal_positions_whatever_cash_and_leverage():
@@ -48,13 +48,11 @@ def test_effective_holdings_counts_equal_positions_whatever_cash_and_leverage():
 def test_scenario_risk_of_a_hand_computed_scenario_set():
     risk = scenario_risk(_scenarios(), np.array([0.5, 0.3]), confidence=0.95)
     # Portfolio simple return 0.5 * (j - 10) / 100 in scenario j.
-    returns = np.log1p(0.005 * (np.arange(SCENARIOS) - 10))
-    var = -np.log(0.955)
+    returns = 0.005 * (np.arange(SCENARIOS) - 10)
+    var = 0.045
     assert risk["var"] == pytest.approx(var)
     # Only the worst scenario lies beyond the VaR; it weighs 1/21 of the 5 % tail.
-    assert risk["cvar"] == pytest.approx(
-        var + (np.log(0.955) - np.log(0.95)) / 21 / 0.05
-    )
+    assert risk["cvar"] == pytest.approx(var + (0.05 - 0.045) / 21 / 0.05)
     assert risk["mean"] == pytest.approx(returns.mean())
     assert risk["std"] == pytest.approx(returns.std())
 
@@ -73,7 +71,7 @@ def test_recorder_reads_the_optimizer_scenarios_and_the_chosen_weights():
     (decision,) = recorder.decisions
     assert decision.date == pd.Timestamp("2024-01-01")
     assert decision.tickers == TICKERS
-    assert decision.var == pytest.approx(-np.log(0.955))
+    assert decision.var == pytest.approx(0.045)
     assert decision.holdings == pytest.approx(0.64 / 0.34)
 
 
@@ -116,9 +114,9 @@ def test_readings_of_a_hand_computed_return_path():
     second = _decision(realized.index[2], [0.0, 0.8], var=0.02, mean=0.001, std=0.02)
     readings = chosen_readings([first, second], realized)
 
-    held_first = _portfolio_log_return(realized.iloc[:3], first.weights)
-    held_second = _portfolio_log_return(realized.iloc[3:], second.weights)
-    # Days 1 (-1.98 %) and 4 (-3.98 %) fall below their decisions' VaR.
+    held_first = _portfolio_return(realized.iloc[:3], first.weights)
+    held_second = _portfolio_return(realized.iloc[3:], second.weights)
+    # Days 1 (-2 %) and 4 (-4 %) fall below their decisions' VaR.
     assert list(held_first < -0.01) == [True, False, False]
     assert list(held_second < -0.02) == [True, False]
     assert readings["chosen_days"] == [3, 2]

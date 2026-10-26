@@ -1,16 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 DataRobot, Inc. and its affiliates. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Each arm's scenarios of the log returns over several horizons after an origin.
+"""Each arm's scenarios of the simple returns over several horizons after an origin.
 
 A rebalanced portfolio is held for weeks, so the comparison scores every arm at
 several horizons, not only the next day. JointFM forecasts every horizon in one
-request (``generate_horizon_samples_jointfm``) and reads the h-day log return
-as the forecast log price at h minus the last observed one. Every other arm
-turns its one-day simulator into an h-day forecast by one rule that needs no
-new modeling: the h-day scenario is the sum of h independent one-day draws of
-the arm's own simulator, which for ``gaussian`` is the familiar square-root-of-h
-scaling. The next day is the arm's own one-day scenarios, exactly as
+request (``generate_horizon_samples_jointfm``): the forecast log price at h
+minus the last observed one is the h-day log return, which the library turns
+into a simple return. Every other arm turns its one-day simulator into an h-day
+forecast by one rule that needs no new modeling: the h-day scenario compounds h
+independent one-day draws of the arm's own simulator, ``prod(1 + r) - 1``.
+The next day is the arm's own one-day scenarios, exactly as
 ``generate_cvar_data`` returns them, so the next-day readings do not depend on
 which other horizons a run scores.
 """
@@ -53,14 +53,15 @@ def horizon_scenarios(
     seed: int,
     horizons: Sequence[int],
 ) -> Mapping[int, np.ndarray]:
-    """Scenarios of the log return over every horizon in ``horizons``.
+    """Scenarios of the simple return over every horizon in ``horizons``.
 
     Parameters
     ----------
     arm : Arm
         The simulator.
     returns_dict : dict
-        The look-back window's log returns as ``calculate_returns`` builds them.
+        The look-back window's simple returns as ``calculate_returns`` builds
+        them.
     num_scen : int
         Scenarios per generating arm, and per multi-day horizon of every arm.
     seed : int
@@ -76,19 +77,27 @@ def horizon_scenarios(
         Horizon to scenarios, shape ``(scenarios, assets)``. The next day holds
         the arm's own one-day scenarios: the window's returns for ``no_fit``,
         ``num_scen`` draws otherwise. A multi-day horizon of a generating arm
-        holds ``num_scen`` sums of independent one-day draws, one per day, read
-        off one running sum over the days up to the longest horizon; for
-        ``no_fit``, whose one-day scenarios are the window's fixed returns, each
-        day's draw resamples them uniformly with replacement.
+        holds ``num_scen`` compounded independent one-day draws, one per day,
+        read off one running product over the days up to the longest horizon;
+        for ``no_fit``, whose one-day scenarios are the window's fixed returns,
+        each day's draw resamples them uniformly with replacement.
         For JointFM every horizon comes from one request, whose horizons the
         service draws independently.
 
     Raises
     ------
     ValueError
-        If ``horizons`` does not start at 1 or is not strictly increasing, or
-        as the arm's simulator raises.
+        If ``returns_dict`` holds other than simple (``LINEAR``) returns, if
+        ``horizons`` does not start at 1 or is not strictly increasing, if a
+        one-day draw entering a multi-day horizon is at or below -100 %, a
+        non-positive price that cannot compound, or as the arm's simulator
+        raises.
     """
+    if returns_dict["return_type"] != "LINEAR":
+        raise ValueError(
+            f"Horizon scenarios compound simple returns; the window holds "
+            f"{returns_dict['return_type']} returns."
+        )
     horizons = list(horizons)
     if horizons[0] != 1 or any(b <= a for a, b in zip(horizons, horizons[1:])):
         raise ValueError(
@@ -111,15 +120,21 @@ def horizon_scenarios(
     scenarios = {1: next_day}
     if horizons[-1] == 1:
         return scenarios
-    total = np.zeros((num_scen, next_day.shape[1]))
+    growth = np.ones((num_scen, next_day.shape[1]))
     resample = np.random.default_rng([seed, HORIZON_STREAM])
     for day in range(1, horizons[-1] + 1):
         if arm.fit_type == "no_fit":
-            total += next_day[resample.integers(0, len(next_day), num_scen)]
+            draw = next_day[resample.integers(0, len(next_day), num_scen)]
         else:
-            total += _one_day(
+            draw = _one_day(
                 arm, returns_dict, num_scen=num_scen, seed=day_seed(seed, day)
             )
+        if (draw <= -1).any():
+            raise ValueError(
+                f"{arm.name} drew a one-day return at or below -100 % on day "
+                f"{day}, a non-positive price that cannot compound."
+            )
+        growth *= 1 + draw
         if day > 1 and day in horizons:
-            scenarios[day] = total.copy()
+            scenarios[day] = growth - 1
     return scenarios

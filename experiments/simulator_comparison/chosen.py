@@ -6,8 +6,8 @@
 An optimizer seeks out the portfolios whose risk its scenarios understate most,
 so the random portfolios of ``PortfolioScores`` can miss the shortfall that
 decisions feel. At every re-optimization, ``DecisionRecorder`` takes the chosen
-portfolio's one-day log returns under the scenarios it was chosen on, in the
-convention of ``PortfolioScores`` (``portfolio_log_returns``: simple returns
+portfolio's one-day returns under the scenarios it was chosen on, in the
+convention of ``PortfolioScores`` (``portfolio_returns``: simple returns
 aggregated by weight, cash earning nothing on both sides), and records:
 
 - ``var``: the value at risk at the optimizer's confidence, the loss its
@@ -22,7 +22,7 @@ aggregated by weight, cash earning nothing on both sides), and records:
 
 ``chosen_readings`` holds each decision's portfolio over the trading days until
 the next decision, the last until the window ends, and counts the days whose
-realized log return falls below ``-var`` and the squared standardized realized
+realized return falls below ``-var`` and the squared standardized realized
 returns ``((r - mean) / std)^2``. Over a run these give the breach rate, on
 average ``1 - confidence`` when the scenarios state the chosen portfolios' risk
 correctly, and the ratio of realized to scenario volatility, the root of the
@@ -38,7 +38,7 @@ import pandas as pd
 from portfolio_optimization.cvar_data import CvarData
 from portfolio_optimization.portfolio import Portfolio
 
-from .portfolios import portfolio_log_returns
+from .portfolios import portfolio_returns
 
 # Decision dates are stored as ISO strings, which Parquet appends to rows read
 # back from a file, unlike datetimes.
@@ -68,7 +68,7 @@ class Decision:
     """One re-optimization's chosen portfolio and its one-day scenario risk.
 
     ``var`` and ``cvar`` are losses, positive when the tail loses money;
-    ``mean`` and ``std`` describe the scenario log returns.
+    ``mean`` and ``std`` describe the scenario returns.
     """
 
     date: pd.Timestamp
@@ -98,18 +98,18 @@ def effective_holdings(weights: np.ndarray) -> float:
 def scenario_risk(
     scenarios: np.ndarray, weights: np.ndarray, confidence: float
 ) -> dict[str, float]:
-    """VaR, CVaR, mean, and standard deviation of one portfolio's scenario log returns.
+    """VaR, CVaR, mean, and standard deviation of one portfolio's scenario returns.
 
     Parameters
     ----------
     scenarios : np.ndarray
-        Equally likely asset log returns, shape ``(scenarios, n_assets)``.
+        Equally likely asset simple returns, shape ``(scenarios, n_assets)``.
     weights : np.ndarray
         Asset weights, shape ``(n_assets,)``.
     confidence : float
         CVaR level in (0, 1); the tail is the worst ``1 - confidence``.
     """
-    returns = portfolio_log_returns(scenarios, weights[None, :])[0]
+    returns = portfolio_returns(scenarios, weights[None, :])[0]
     tail = 1 - confidence
     var = -float(np.quantile(returns, tail))
     cvar = var + float(np.maximum(-returns - var, 0.0).mean()) / tail
@@ -187,7 +187,7 @@ def chosen_readings(
     decisions : sequence of Decision
         The run's decisions in date order, the first on the window's first day.
     realized : pd.DataFrame
-        Daily asset log returns of the trading window, dated by the day each
+        Daily asset simple returns of the trading window, dated by the day each
         return ends on, one column per ticker of the decisions.
 
     Returns
@@ -228,7 +228,7 @@ def chosen_readings(
         held = realized.loc[(realized.index > decision.date) & (realized.index <= end)]
         if held.empty:
             raise ValueError(f"The decision of {decision.date} holds no trading day.")
-        returns = portfolio_log_returns(held.to_numpy(), decision.weights[None, :])[0]
+        returns = portfolio_returns(held.to_numpy(), decision.weights[None, :])[0]
         z = (returns - decision.mean) / decision.std
         for column, value in (
             ("chosen_dates", decision.date.strftime(DATE_FORMAT)),

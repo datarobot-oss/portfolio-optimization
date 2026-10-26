@@ -130,14 +130,17 @@ class TestTrials:
         inputs = origin_inputs(
             prices, trial, origin, seed=5, look_back=LOOK_BACK, forward=FORWARD
         )
-        log_prices = np.log(prices[list(trial.assets)])
-        expected = log_prices.diff().iloc[origin + 1 : origin + 1 + FORWARD]
+        universe = prices[list(trial.assets)]
+        expected = universe.pct_change().iloc[origin + 1 : origin + 1 + FORWARD]
         pd.testing.assert_frame_equal(inputs.forward, expected)
         pd.testing.assert_series_equal(
             inputs.realized(1), expected.iloc[0], check_names=False
         )
+        # The h-day outcome compounds the daily returns: the price ratio minus one.
         pd.testing.assert_series_equal(
-            inputs.realized(FORWARD), expected.sum(), check_names=False
+            inputs.realized(FORWARD),
+            universe.iloc[origin + FORWARD] / universe.iloc[origin] - 1,
+            check_names=False,
         )
         with pytest.raises(ValueError, match="needs 9 forward returns"):
             inputs.realized(FORWARD + 1)
@@ -185,7 +188,8 @@ class TestRunner:
             # no_fit returns the window itself, and JointFM got its log-price path.
             np.testing.assert_array_equal(samples, window.to_numpy())
             np.testing.assert_allclose(
-                call["history"].to_numpy()[1:], np.cumsum(window.to_numpy(), axis=0)
+                call["history"].to_numpy()[1:],
+                np.cumsum(np.log1p(window.to_numpy()), axis=0),
             )
         assert (frame.loc[frame["arm"] == "no_fit-cpu", "num_scen"] == LOOK_BACK).all()
         assert (frame.loc[frame["arm"] != "no_fit-cpu", "num_scen"] == 16).all()

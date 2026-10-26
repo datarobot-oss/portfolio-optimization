@@ -21,9 +21,10 @@ Cash earns the dated risk-free rates of ``risk_free_rates``: every optimization
 credits it with the rate quoted on its date, the backtest accrues it day by
 day, and the Sharpe and Sortino ratios subtract the same daily rates.
 
-Portfolio values follow the library's backtester, which values ``LOG`` returns
-as ``exp(cumsum(R_log @ w))``: a value that cannot reach zero, which
-understates the losses of short positions. That bias is accepted for now.
+Every return is a simple return (``RETURNS_SETTINGS``), so the optimizer's
+portfolio return ``R @ w`` is exact, and portfolio values follow the library's
+backtester as ``cumprod(1 + R @ w)``, which carries the full loss of a short
+position.
 
 Every optimization also records the chosen portfolio's one-day scenario risk
 (``chosen.DecisionRecorder``), and the run reads it against the realized
