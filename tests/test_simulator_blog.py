@@ -13,9 +13,12 @@ import pytest
 from experiments.simulator_comparison.blog import (
     BLOG_RANKING_SCORES,
     BLOG_SKILL_SCORES,
+    DEVICE_RATIO,
     REGIME_METRICS,
     RISK_FREE_ROW,
+    _dot_groups,
     blog_styles,
+    device_runtime_table,
     growth_table,
     performance_table,
     risk_free_return,
@@ -42,6 +45,8 @@ FIGURES = (
     "growth",
     "risk_return",
     "performance",
+    "runtime",
+    "runtime_devices",
 )
 TABLES = FIGURES
 
@@ -185,6 +190,16 @@ def test_the_frontier_runs_through_the_steepest_line_from_cash():
     assert set(table["trials"]) == {5}
 
 
+def test_dots_that_would_hide_each_other_share_a_group_in_row_order():
+    """The full run's Historical and KDE means, 0.03 points apart, draw as one place."""
+    points = pd.DataFrame(
+        {"x": [37.31, 38.11, 37.34, 32.96, 0.0], "y": [10.88, 9.44, 10.90, 17.22, 1.1]},
+        index=["no_fit", "gaussian", "kde", "jointfm", RISK_FREE_ROW],
+    )
+    groups = _dot_groups(points, (-1.3, 42.6), (-1.3, 24.2))
+    assert groups == [["no_fit", "kde"], ["gaussian"], ["jointfm"], [RISK_FREE_ROW]]
+
+
 def test_cash_compounds_each_trials_rates_to_an_annual_return():
     """A window at a constant rate earns that rate; the trials' returns are averaged."""
     dates = pd.date_range("2020-01-01", periods=60, freq="B")
@@ -275,7 +290,27 @@ def blog(tmp_path_factory, module_fake_jointfm):
     )
     run_experiment(config, [ScenarioScores(), portfolios])
     run_rebalancing_experiment(config)
-    return config, write_blog(config)
+    return config, write_blog(config, _device_timing(config, module_fake_jointfm))
+
+
+def _device_timing(config, fake_jointfm, devices=("cuda", "cpu")):
+    """Next-day results of the window and JointFM, one session per service device,
+    as task experiments:timing measures them; returns the results file."""
+    timing = config.model_copy(
+        update={
+            "output": config.output.with_name(f"timing_{'_'.join(devices)}.parquet"),
+            "arms": ("no_fit-cpu", "jointfm"),
+            "horizons": (1,),
+        }
+    )
+    portfolios = PortfolioScores(
+        timing.portfolio_sizes, timing.rebalancing.cvar, timing.assets
+    )
+    for device in devices:
+        fake_jointfm.device = device
+        run_experiment(timing, [ScenarioScores(), portfolios])
+    fake_jointfm.device = "cpu"
+    return timing.output
 
 
 def test_writes_only_the_blog_figures_and_their_tables(blog):
@@ -351,6 +386,38 @@ def test_risk_return_draws_the_performance_means_and_cash_at_its_rate(blog):
     )
 
 
+def test_runtime_devices_reads_jointfm_on_each_device_and_their_ratio(blog):
+    config, _ = blog
+    table = pd.read_csv(config.blog_dir / "runtime_devices.csv")
+    seconds = table[table["reading"] == "seconds"].set_index("device")
+    assert list(seconds["arm"]) == ["jointfm-cpu", "jointfm-gpu"]
+    timed, _ = read_results(config.output.with_name("timing_cuda_cpu.parquet"))
+    timed = timed[~timed["warmup"]]
+    per_trial = timed.groupby(["arm", "trial"])["seconds"].mean()
+    np.testing.assert_allclose(
+        seconds["estimate"],
+        [per_trial["jointfm-cpu"].mean(), per_trial["jointfm-gpu"].mean()],
+    )
+    ratio = table[table["reading"] == DEVICE_RATIO].iloc[0]
+    assert ratio["estimate"] == pytest.approx(
+        np.median(per_trial["jointfm-cpu"] / per_trial["jointfm-gpu"])
+    )
+    assert ratio["ci_low"] <= ratio["estimate"] <= ratio["ci_high"]
+
+
+def test_device_timing_beyond_the_next_day_is_refused(blog):
+    config, _ = blog
+    with pytest.raises(ValueError, match="next day only"):
+        device_runtime_table(config.output)
+
+
+def test_device_timing_without_both_devices_is_refused(blog, module_fake_jointfm):
+    config, _ = blog
+    one_device = _device_timing(config, module_fake_jointfm, devices=("cuda",))
+    with pytest.raises(ValueError, match="no JointFM arm on both devices"):
+        device_runtime_table(one_device)
+
+
 def test_a_rate_file_other_than_the_backtests_is_refused(blog, tmp_path):
     config, _ = blog
     other = tmp_path / "rates.csv"
@@ -364,4 +431,4 @@ def test_a_rate_file_other_than_the_backtests_is_refused(blog, tmp_path):
         }
     )
     with pytest.raises(ValueError, match="risk-free rate file"):
-        write_blog(changed)
+        write_blog(changed, config.output.with_name("timing_cuda_cpu.parquet"))

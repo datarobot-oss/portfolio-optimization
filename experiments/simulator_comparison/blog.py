@@ -7,7 +7,7 @@ The two reports (``report``, ``rebalancing_report``) draw every reading of
 every arm, so they show where JointFM needs to improve as much as where it
 leads. This module draws only the readings the blog post builds its story on,
 for the scenario simulators, from the scenario and rebalancing results one
-configuration names, into ``<output stem>_blog/`` beside the scenario results
+configuration names and the results of the JointFM timing, into ``<output stem>_blog/`` beside the scenario results
 (``ExperimentConfig.blog_dir``). Each figure is a PNG and an SVG, with a CSV
 of exactly the numbers it draws.
 
@@ -17,14 +17,17 @@ of exactly the numbers it draws.
   ``BLOG_SKILL_SCORES``, over the horizons.
 - ``volatility_regimes``: next-day spread and 90 % interval coverage over all
   origins and per tercile of the volatility ratio (``regimes``).
-- ``growth``: the rebalanced portfolio's mean cumulative return and mean
-  drawdown from its running peak after every step.
+- ``growth``: the rebalanced portfolio's mean cumulative return and the mean of
+  each trial's drawdown from its own running peak after every step.
 - ``risk_return``: each simulator's mean annualized volatility against its mean
   annualized return, cash at the backtests' mean risk-free return, and the
   frontier with cash: the line from cash through the simulator whose line from
   cash is steepest (``risk_return_table``).
 - ``performance``: every reading of ``PERFORMANCE_METRICS``, with the number of
   trials in which each simulator did better than replaying the window.
+- ``runtime``: each simulator's mean seconds per scenario-generation call.
+- ``runtime_devices``: JointFM's mean seconds per next-day request on a CPU
+  and a GPU service, and their ratio, from a timing configuration's results.
 
 Every statistic comes from ``analysis``, ``regimes``, and
 ``rebalancing_report``, so the numbers equal the reports'. The figures name the
@@ -45,7 +48,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
-from matplotlib.ticker import PercentFormatter
+from matplotlib.ticker import (
+    LogLocator,
+    NullLocator,
+    PercentFormatter,
+    StrMethodFormatter,
+)
 
 from portfolio_optimization import risk_free
 
@@ -57,9 +65,11 @@ from .analysis import (
     skill,
     skill_summary,
     stack_horizons,
+    timing,
 )
 from .config import ExperimentConfig, load_config
 from .plotting import (
+    DEVICE_ORDER,
     GRID,
     INK,
     INK_SECONDARY,
@@ -92,7 +102,7 @@ from .regimes import (
     regime_readings,
     terciles,
 )
-from .report import ReportOutputs, _check_scores_recorded
+from .report import ReportOutputs, _check_scores_recorded, _duration
 from .runner import load_prices
 from .scores import PORTFOLIO_CRPS, TRAILING_STD_WINDOW
 from .table import read_results
@@ -178,6 +188,19 @@ RISK_FREE_ROW = "risk_free"
 FRONTIER_ROOM = 0.12
 # Opacity of the area below the frontier with cash.
 FRONTIER_SHADE = 0.1
+# Distance within which two risk-return dots hide each other, as a share of
+# each axis span.
+DOT_OVERLAP = 0.03
+# Offset of a dot's label from its center, in points.
+DOT_LABEL_OFFSET = 8, 6
+# Room left of the fastest interval and right of the slowest for its value
+# label, as factors on a log axis of seconds.
+SECONDS_LEFT_ROOM = 1.5
+SECONDS_RIGHT_ROOM = 4.0
+# Labeled steps within each decade of a log axis of seconds.
+SECONDS_TICK_STEPS = (1.0, 2.0, 5.0)
+# The reading of runtime_devices.csv that holds the CPU-to-GPU time ratio.
+DEVICE_RATIO = "cpu_over_gpu"
 
 
 @dataclass(frozen=True)
@@ -440,6 +463,96 @@ def risk_return_table(
     return table
 
 
+def runtime_table(
+    per_trial: pd.DataFrame, styles: Sequence[BlogStyle], experiment: dict
+) -> pd.DataFrame:
+    """Per drawn simulator: mean seconds per scenario-generation call, with its interval.
+
+    The means are ``analysis.timing``'s, over calls without warm-up. One call
+    generates every horizon of ``experiment``, so ``assets``, ``num_scen``,
+    and ``longest_horizon`` record what a call delivered.
+    """
+    means, _ = timing(per_trial)
+    table = means.loc[[style.name for style in styles]].reset_index()
+    table["device"] = [style.device for style in styles]
+    return table.assign(
+        assets=experiment["assets"],
+        num_scen=experiment["num_scen"],
+        longest_horizon=max(experiment["horizons"]),
+    )
+
+
+def device_runtime_table(timing_results: Path) -> pd.DataFrame:
+    """JointFM's mean seconds per next-day request on a CPU and a GPU service, and their ratio.
+
+    ``timing_results`` is the results file of a timing configuration, which
+    ``task experiments:timing`` fills with one session per service. Rows of
+    reading ``seconds`` hold each device's mean over trials (``analysis.timing``);
+    the row of reading ``DEVICE_RATIO`` holds the median over trials of CPU
+    seconds over GPU seconds. Every row carries its 95 % bootstrap interval,
+    the trials it read, and the request's ``assets`` and ``num_scen``.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``timing_results`` does not exist.
+    ValueError
+        If the results hold a horizon other than the next day, since a call
+        then generates more than one next-day request, or lack JointFM on
+        either device.
+    """
+    if not timing_results.exists():
+        raise FileNotFoundError(
+            f"{timing_results} does not exist; run task experiments:timing with "
+            f"a GPU and a CPU service first."
+        )
+    frame, metadata = read_results(timing_results)
+    identity = metadata.identity
+    experiment = identity["experiment"]
+    if experiment["horizons"] != [NEXT_DAY]:
+        raise ValueError(
+            f"{timing_results} holds horizons {experiment['horizons']}; device "
+            f"timing needs the next day only, as configs/timing.yaml measures it."
+        )
+    frame, _ = complete_trials(frame, tuple(identity["arms"]), experiment["origins"], 1)
+    per_trial = aggregate(frame)
+    means, speedups = timing(per_trial)
+    fit_types = per_trial.groupby("arm")["fit_type"].first()
+    pairs = speedups[speedups["gpu_arm"].map(fit_types) == "jointfm"]
+    if pairs.empty:
+        raise ValueError(
+            f"{timing_results} holds no JointFM arm on both devices; run "
+            f"task experiments:timing with a GPU and a CPU service."
+        )
+    pair = pairs.iloc[0]
+    rows = [
+        {
+            "reading": "seconds",
+            "arm": arm,
+            "device": device,
+            "estimate": means.loc[arm, "mean_seconds"],
+            "ci_low": means.loc[arm, "ci_low"],
+            "ci_high": means.loc[arm, "ci_high"],
+            "trials": means.loc[arm, "trials"],
+        }
+        for arm, device in ((pair["cpu_arm"], "CPU"), (pair["gpu_arm"], "GPU"))
+    ]
+    rows.append(
+        {
+            "reading": DEVICE_RATIO,
+            "arm": f"{pair['cpu_arm']} / {pair['gpu_arm']}",
+            "device": "",
+            "estimate": pair["median_speedup"],
+            "ci_low": pair["ci_low"],
+            "ci_high": pair["ci_high"],
+            "trials": pair["trials"],
+        }
+    )
+    return pd.DataFrame(rows).assign(
+        assets=experiment["assets"], num_scen=experiment["num_scen"]
+    )
+
+
 def _style_text(figure) -> None:
     for ax in figure.axes:
         ax.tick_params(labelsize=TEXT_SIZE)
@@ -671,7 +784,11 @@ def plot_volatility_regimes(
 def plot_growth(
     growth: pd.DataFrame, styles: Sequence[BlogStyle], directory: Path
 ) -> list[Path]:
-    """Mean cumulative return and mean drawdown after every step, one line per simulator."""
+    """Mean cumulative return and mean drawdown after every step, one line per simulator.
+
+    The drawdown panel averages each trial's own drawdown, not the drawdown of
+    the mean return curve, so it deepens while the mean return rises.
+    """
     figure, axes = _figure(10, 7.5, rows=2)
     top, bottom = axes[:, 0]
     bottom.sharex(top)
@@ -712,8 +829,8 @@ def plot_growth(
     _axis_labels(bottom, "trading days since the backtest started", "drawdown (%)")
     _panel_title(
         bottom,
-        "Drawdown from the running peak",
-        f"mean over {trials} trials at every rebalancing date",
+        "Drawdown of each trial from its own peak",
+        f"mean over {trials} trials of how far each lies below its highest value so far",
     )
     _headline(figure, "Rebalanced portfolio over the backtest")
     _legend(figure, styles, lines=True, reference="starting value")
@@ -728,6 +845,27 @@ def _level(performance: pd.DataFrame, metric: str, arm: str) -> np.ndarray:
     return scale * row[["mean", "ci_low", "ci_high"]].to_numpy(dtype=float)[0]
 
 
+def _dot_groups(
+    points: pd.DataFrame, xlim: tuple[float, float], ylim: tuple[float, float]
+) -> list[list[str]]:
+    """Rows of ``points`` (x, y per row) grouped where their dots would hide each other.
+
+    A row joins the first group whose first row lies within ``DOT_OVERLAP`` of
+    the axis span on both axes, or else starts a group; groups and their
+    members keep the rows' order.
+    """
+    spans = DOT_OVERLAP * np.array([xlim[1] - xlim[0], ylim[1] - ylim[0]])
+    groups: list[list[str]] = []
+    for row in points.index:
+        for group in groups:
+            if (abs(points.loc[row] - points.loc[group[0]]).to_numpy() < spans).all():
+                group.append(row)
+                break
+        else:
+            groups.append([row])
+    return groups
+
+
 def plot_risk_return(
     table: pd.DataFrame, styles: Sequence[BlogStyle], directory: Path
 ) -> list[Path]:
@@ -736,7 +874,10 @@ def plot_risk_return(
     The frontier is the line from cash through the simulator ``frontier`` marks
     in ``risk_return_table``: solid where a mix of its portfolio with cash
     reaches it, dashed beyond, where the mix borrows at the risk-free rate. The
-    area below the line is shaded.
+    area below the line is shaded. Dots that would hide each other
+    (``_dot_groups``) draw as concentric rings, the first simulator outermost,
+    under one label listing them outside in. The two dots on the line keep
+    their labels off it: cash's below, the frontier simulator's to its left.
     """
     figure, axes = _figure(8, 6.5)
     ax = axes[0, 0]
@@ -791,30 +932,40 @@ def plot_risk_return(
         color=best.color,
         fontsize=TEXT_SIZE,
     )
-    dots = [(style.name, style.color, style.inline_label) for style in styles] + [
-        (RISK_FREE_ROW, INK_SECONDARY, f"cash, risk-free {cash:.1f} %")
-    ]
-    for arm, color, label in dots:
-        volatility, annual = points.loc[arm]
-        ax.scatter(
-            [volatility],
-            [annual],
-            s=INTERVAL_MARKER_AREA,
-            facecolor=color,
-            edgecolor=SURFACE,
-            linewidth=MARKER_EDGE,
-            zorder=3,
-        )
+    ax.set_xlim(-FRONTIER_ROOM * right / 4, right)
+    ax.set_ylim(bottom, top)
+    colors = {style.name: style.color for style in styles}
+    colors[RISK_FREE_ROW] = INK_SECONDARY
+    labels = {style.name: style.inline_label for style in styles}
+    labels[RISK_FREE_ROW] = f"cash, risk-free {cash:.1f} %"
+    right_x, up_y = DOT_LABEL_OFFSET
+    placements = {
+        RISK_FREE_ROW: ((right_x, -up_y), "left", "top"),
+        best.name: ((-right_x, up_y), "right", "bottom"),
+    }
+    for group in _dot_groups(points.loc[list(colors)], ax.get_xlim(), ax.get_ylim()):
+        for rank, arm in enumerate(group):
+            volatility, annual = points.loc[arm]
+            ax.scatter(
+                [volatility],
+                [annual],
+                s=INTERVAL_MARKER_AREA * (len(group) - rank) ** 2 / len(group),
+                facecolor=colors[arm],
+                edgecolor=SURFACE,
+                linewidth=MARKER_EDGE,
+                zorder=3,
+            )
+        offset, ha, va = placements.get(group[0], (DOT_LABEL_OFFSET, "left", "bottom"))
         ax.annotate(
-            label,
-            xy=(volatility, annual),
-            xytext=(8, 6),
+            "\n".join(labels[arm] for arm in group),
+            xy=tuple(points.loc[group[0]]),
+            xytext=offset,
             textcoords="offset points",
+            ha=ha,
+            va=va,
             color=INK_SECONDARY,
             fontsize=TEXT_SIZE,
         )
-    ax.set_xlim(-FRONTIER_ROOM * right / 4, right)
-    ax.set_ylim(bottom, top)
     trials = int(table["trials"].iloc[0])
     _axis_labels(ax, "annualized volatility (%)", "annualized return (%)")
     _panel_title(
@@ -832,6 +983,132 @@ def plot_risk_return(
     _headline(figure, "Rebalanced portfolios: return against volatility, with cash")
     _style_text(figure)
     return _save(figure, directory, "risk_return")
+
+
+def _seconds_rows(ax, rows: Sequence[tuple[str, str, float, float, float]]) -> None:
+    """One row per (label, color, mean, low, high), top to bottom, on a log axis of seconds.
+
+    Each row is a dot at its mean and a line across its interval, labeled with
+    the mean right of the interval.
+    """
+    ax.grid(axis="y", visible=False)
+    ax.grid(axis="x", color=GRID, linewidth=1)
+    for position, (_, color, mean, low, high) in enumerate(rows):
+        ax.hlines(position, low, high, color=color, linewidth=LINE_WIDTH)
+        ax.scatter(
+            [mean],
+            [position],
+            s=INTERVAL_MARKER_AREA,
+            facecolor=color,
+            edgecolor=SURFACE,
+            linewidth=MARKER_EDGE,
+            zorder=3,
+        )
+        ax.annotate(
+            _duration(mean),
+            xy=(high, position),
+            xytext=(6, 0),
+            textcoords="offset points",
+            va="center",
+            color=INK_SECONDARY,
+            fontsize=TEXT_SIZE,
+        )
+    ax.set_xscale("log")
+    ax.xaxis.set_major_locator(LogLocator(subs=SECONDS_TICK_STEPS))
+    ax.xaxis.set_major_formatter(StrMethodFormatter("{x:g}"))
+    ax.xaxis.set_minor_locator(NullLocator())
+    ax.set_yticks(range(len(rows)), [row[0] for row in rows])
+    ax.set_ylim(len(rows) - 0.4, -0.6)
+    ax.set_xlim(
+        min(row[3] for row in rows) / SECONDS_LEFT_ROOM,
+        max(row[4] for row in rows) * SECONDS_RIGHT_ROOM,
+    )
+    ax.set_xlabel("seconds per call (log)", color=INK_SECONDARY, fontsize=TEXT_SIZE)
+
+
+def plot_runtime(
+    table: pd.DataFrame, styles: Sequence[BlogStyle], directory: Path
+) -> list[Path]:
+    """Each simulator's mean seconds per scenario-generation call (``runtime_table``)."""
+    figure, axes = _figure(8, 0.7 * len(styles) + 2.6)
+    ax = axes[0, 0]
+    rows = table.set_index("arm")
+    _seconds_rows(
+        ax,
+        [
+            (
+                f"{style.inline_label} on {style.device}",
+                style.color,
+                *rows.loc[style.name, ["mean_seconds", "ci_low", "ci_high"]],
+            )
+            for style in styles
+        ],
+    )
+    first = table.iloc[0]
+    _panel_title(
+        ax,
+        "Seconds per scenario-generation call",
+        f"mean over {int(first['trials'])} trials with its 95 % interval;"
+        " calls without warm-up",
+    )
+    figure.supxlabel(
+        f"A call generates {int(first['num_scen']):,} scenarios of "
+        f"{int(first['assets'])} assets at every horizon up to "
+        f"{int(first['longest_horizon'])} trading days:\none request for "
+        "JointFM, a next-day call plus one one-day draw per day for the others.",
+        color=MUTED,
+        fontsize=SUBTITLE_SIZE,
+    )
+    _headline(figure, "Scenario generation: seconds per call")
+    _style_text(figure)
+    return _save(figure, directory, "runtime")
+
+
+def plot_device_runtime(
+    table: pd.DataFrame, styles: Sequence[BlogStyle], directory: Path
+) -> list[Path]:
+    """JointFM's mean seconds per next-day request per device (``device_runtime_table``).
+
+    The GPU row's label carries the CPU-to-GPU ratio with its interval.
+    """
+    figure, axes = _figure(8, 3.6)
+    ax = axes[0, 0]
+    jointfm = next(style for style in styles if style.fit_type == "jointfm")
+    seconds = table[table["reading"] == "seconds"].set_index("device")
+    ratio = table[table["reading"] == DEVICE_RATIO].iloc[0]
+    labels = {
+        "CPU": f"{jointfm.inline_label} on CPU",
+        "GPU": f"{jointfm.inline_label} on GPU\nCPU ÷ GPU {ratio['estimate']:.1f}× "
+        f"({ratio['ci_low']:.1f}–{ratio['ci_high']:.1f})",
+    }
+    _seconds_rows(
+        ax,
+        [
+            (
+                labels[device],
+                jointfm.color,
+                *seconds.loc[device, ["estimate", "ci_low", "ci_high"]],
+            )
+            for device in DEVICE_ORDER
+        ],
+    )
+    _panel_title(
+        ax,
+        f"{jointfm.inline_label} seconds per next-day request",
+        f"mean over {int(seconds['trials'].iloc[0])} trials with its 95 % interval;"
+        " requests without warm-up",
+    )
+    figure.supxlabel(
+        f"A request asks for {int(ratio['num_scen']):,} joint scenarios of "
+        f"{int(ratio['assets'])} assets, timed with the HTTP round trip to the "
+        "service.\nThe ratio is the median over trials of CPU seconds over GPU "
+        "seconds, with its 95 % interval.",
+        color=MUTED,
+        fontsize=SUBTITLE_SIZE,
+    )
+    _headline(figure, f"{jointfm.inline_label} on CPU and GPU: seconds per request")
+    _style_text(figure)
+    return _save(figure, directory, "runtime_devices")
 
 
 def plot_performance(
@@ -900,14 +1177,16 @@ def plot_performance(
     return _save(figure, directory, "performance")
 
 
-def write_blog(config: ExperimentConfig) -> ReportOutputs:
+def write_blog(config: ExperimentConfig, timing_results: Path) -> ReportOutputs:
     """Compute the blog's readings from a configuration's results and write its figures.
 
     The scenario figures read ``config.output`` and the price file it was
     measured on, over the trials in which every arm has every origin at every
     horizon; the rebalancing figures read ``config.rebalancing.output``, over
     the trials in which every arm finished, and the risk-free rate file the
-    backtests' cash earned. Everything goes to ``config.blog_dir``.
+    backtests' cash earned. The device figure reads ``timing_results``, the
+    results of a timing configuration (``device_runtime_table``). Everything
+    goes to ``config.blog_dir``.
 
     Raises
     ------
@@ -916,8 +1195,9 @@ def write_blog(config: ExperimentConfig) -> ReportOutputs:
         results file was measured on another price file, the rebalancing
         results earned cash at another risk-free rate file, the scenario
         results lack ``REFERENCE_ARM``, have too few complete trials or a
-        volatility tercile with too few trials, or the rebalancing results
-        have too few complete trials.
+        volatility tercile with too few trials, the rebalancing results
+        have too few complete trials, or ``timing_results`` holds a horizon
+        other than the next day or lacks JointFM on either device.
     """
     frame, metadata = read_results(config.output)
     identity = metadata.identity
@@ -962,6 +1242,8 @@ def write_blog(config: ExperimentConfig) -> ReportOutputs:
         "growth": growth_table(runs, run_styles, step_days),
         "risk_return": risk_return_table(performance, run_styles, cash),
         "performance": performance,
+        "runtime": runtime_table(per_trial[NEXT_DAY], styles, experiment),
+        "runtime_devices": device_runtime_table(timing_results),
     }
     directory = config.blog_dir
     directory.mkdir(parents=True, exist_ok=True)
@@ -976,6 +1258,8 @@ def write_blog(config: ExperimentConfig) -> ReportOutputs:
     files += plot_growth(tables["growth"], run_styles, directory)
     files += plot_risk_return(tables["risk_return"], run_styles, directory)
     files += plot_performance(tables["performance"], run_styles, directory)
+    files += plot_runtime(tables["runtime"], styles, directory)
+    files += plot_device_runtime(tables["runtime_devices"], styles, directory)
     return ReportOutputs(files=files, excluded_trials=excluded)
 
 
@@ -988,12 +1272,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config", type=Path, required=True, help="YAML configuration file."
     )
+    parser.add_argument(
+        "--timing-config",
+        type=Path,
+        required=True,
+        help="YAML configuration of the JointFM CPU-against-GPU timing "
+        "(task experiments:timing), whose results the device figure reads.",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    config = load_config(build_parser().parse_args(argv).config)
-    outputs = write_blog(config)
+    args = build_parser().parse_args(argv)
+    config = load_config(args.config)
+    outputs = write_blog(config, load_config(args.timing_config).output)
     if outputs.excluded_trials:
         print(
             f"Left out {len(outputs.excluded_trials)} incomplete scenario trials: "

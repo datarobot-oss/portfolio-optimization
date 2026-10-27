@@ -207,16 +207,18 @@ Rerunning resumes the results file and re-renders the report; `task experiments:
 task experiments:blog CONFIG=experiments/simulator_comparison/configs/full.yaml
 ```
 
-The two reports draw every reading of every arm, so they show where JointFM needs to improve as much as where it leads. [`blog.py`](blog.py) draws only the readings a blog post about JointFM builds its story on, from a config's scenario results and rebalancing results, into `<output stem>_blog/` beside the scenario results: `pilot_blog/` for the pilot, `full_blog/` for the full set. That folder holds the blog's figures and nothing else: each figure as PNG and SVG, and a CSV of exactly the numbers it draws, which is what the post's text cites. `experiments:all` writes it last, so `experiments:pilot` and `experiments:full` both produce it; it needs both results files, so a twin config has none.
+The two reports draw every reading of every arm, so they show where JointFM needs to improve as much as where it leads. [`blog.py`](blog.py) draws only the readings a blog post about JointFM builds its story on, from a config's scenario results and rebalancing results and from the JointFM timing results of [`timing.yaml`](configs/timing.yaml) (`TIMING_CONFIG`), into `<output stem>_blog/` beside the scenario results: `pilot_blog/` for the pilot, `full_blog/` for the full set. That folder holds the blog's figures and nothing else: each figure as PNG and SVG, and a CSV of exactly the numbers it draws, which is what the post's text cites. `experiments:all` writes it last, so `experiments:pilot` and `experiments:full` both produce it; it needs both results files, so a twin config has none. It also needs the timing results with JointFM on both devices, so run `experiments:timing` once before the first blog; until then the blog stops with an error that names it.
 
 | Figure | Reading | Results |
 | --- | --- | --- |
 | `ranking` | Each simulator's share of trials with the best next-day energy score and portfolio CRPS, and its mean rank | Scenario |
 | `skill_horizons` | Energy-score and CRPS skill against `no_fit-cpu` over the horizons: median over trials with its interval | Scenario |
 | `volatility_regimes` | Next-day spread and 90 % interval coverage over all origins and per tercile of the volatility ratio ([Regimes](#report)) | Scenario |
-| `growth` | Mean cumulative return and mean drawdown from the running peak at every rebalancing date | Rebalancing |
+| `growth` | Mean cumulative return and the mean of each trial's drawdown from its own running peak at every rebalancing date | Rebalancing |
 | `risk_return` | Each simulator's mean annualized volatility against its mean annualized return as a dot, with cash at the backtests' mean risk-free return and the frontier with cash: the line from cash through the simulator whose line from cash is steepest, which any mix of that simulator's portfolio with cash reaches (solid) or reaches by borrowing at the risk-free rate (dashed). The area below it is shaded. | Rebalancing |
 | `performance` | Annualized return and volatility, Sharpe, Sortino, maximum drawdown, and Calmar ratio per simulator, and the trials in which each beat `no_fit-cpu` | Rebalancing |
+| `runtime` | Mean seconds per scenario-generation call per simulator, on its drawn device, with its interval over trials ([Timing](#results)): a call generates every horizon of the config | Scenario |
+| `runtime_devices` | JointFM's mean seconds per next-day request on the CPU and the GPU service, and the median per-trial ratio of CPU over GPU seconds, each with its interval | Timing |
 
 - **Same numbers as the reports.** Every statistic comes from the functions the reports use, so a blog number equals the report's reading of the same arm, score, and horizon. The ranking ranks the drawn simulators only.
 - **Simulators only, by their blog names.** The figures draw one arm per scenario simulator, named as the post names them: Historical (`no_fit`), Gaussian, KDE, and JointFM. A simulator that ran on both devices is drawn by its GPU arm. The measurement arms appear in the reports only.

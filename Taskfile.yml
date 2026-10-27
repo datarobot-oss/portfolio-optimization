@@ -122,14 +122,16 @@ tasks:
   experiments:blog:
     desc: >-
       Blog figures of the scenario and rebalancing results of CONFIG (default
-      full.yaml), written to <output stem>_blog beside them, without running
-      anything
+      full.yaml) and of the JointFM timing results of TIMING_CONFIG (default
+      timing.yaml, filled by experiments:timing), written to <output
+      stem>_blog beside them, without running anything
     vars:
       CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/full.yaml")}}'
+      TIMING_CONFIG: '{{.TIMING_CONFIG | default (print .CONFIG_DIR "/timing.yaml")}}'
     cmds:
       - >-
         uv run --extra experiments python -m experiments.simulator_comparison.blog
-        --config {{.CONFIG}}
+        --config {{.CONFIG}} --timing-config {{.TIMING_CONFIG}}
       - echo "experiments:blog succeeded for {{.CONFIG}}"
 
   experiments:paired:
