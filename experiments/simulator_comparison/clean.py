@@ -5,9 +5,9 @@
 
 The runners resume their results files, so a run after a change of code or
 library defaults would refuse the old file or add to it. This deletes the
-scenario results, report, and blog figures, and the rebalancing results,
-report, and per-trial universes the configuration names, and prints each path
-it removes.
+scenario results, report, and blog figures, the rebalancing results, report,
+and per-trial universes, and the universe-size results and universes the
+configuration names, and prints each path it removes.
 Run it as ``python -m experiments.simulator_comparison.clean``.
 """
 
@@ -23,13 +23,15 @@ from .config import ExperimentConfig, load_config
 def outputs(config: ExperimentConfig) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
     """The results files and the directories a configuration writes."""
     rebalancing = config.rebalancing
+    sweep = config.universe_sizes
     return (
-        (config.output, rebalancing.output),
+        (config.output, rebalancing.output, sweep.output),
         (
             config.report_dir,
             config.blog_dir,
             rebalancing.report_dir,
             rebalancing.universe_dir,
+            sweep.universe_dir,
         ),
     )
 

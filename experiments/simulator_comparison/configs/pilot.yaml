@@ -45,3 +45,8 @@ rebalancing:
     T_tar: 0.5
     confidence: 0.95
     risk_aversion: 1.0
+# Rebalancing backtest of nested subsets of the same universes (task experiments:universe-sizes).
+universe_sizes:
+  output: results/simulator_comparison/pilot_universe_sizes.parquet
+  arms: [no_fit-cpu, gaussian-cpu, kde-gpu, jointfm]
+  sizes: [10, 50, 100]

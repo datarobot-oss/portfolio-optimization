@@ -140,6 +140,19 @@ tasks:
         experiments.simulator_comparison.rebalancing_report --config {{.CONFIG}}
       - echo "experiments:rebalance-report succeeded for {{.CONFIG}}"
 
+  experiments:universe-sizes:
+    desc: >-
+      Rebalancing backtest of nested asset subsets of every trial's universe
+      per simulator for CONFIG (default full.yaml), resuming its results file,
+      then the blog figures
+    vars:
+      CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/full.yaml")}}'
+    cmds:
+      - '{{.UV_EXPERIMENTS}} python -m experiments.simulator_comparison.universe_sizes --config {{.CONFIG}}'
+      - task: experiments:blog
+        vars: {CONFIG: '{{.CONFIG}}'}
+      - echo "experiments:universe-sizes succeeded for {{.CONFIG}}"
+
   experiments:blog:
     desc: >-
       Blog figures of the scenario and rebalancing results of CONFIG (default
@@ -173,8 +186,8 @@ tasks:
   experiments:all:
     desc: >-
       Run the scenario comparison of CONFIG (default full.yaml), its report,
-      the rebalancing backtests with their report, and the blog figures,
-      resuming both results files
+      the rebalancing backtests with their report, the universe-size
+      backtests, and the blog figures, resuming every results file
     vars:
       CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/full.yaml")}}'
     cmds:
@@ -184,7 +197,7 @@ tasks:
         vars: {CONFIG: '{{.CONFIG}}'}
       - task: experiments:rebalance
         vars: {CONFIG: '{{.CONFIG}}'}
-      - task: experiments:blog
+      - task: experiments:universe-sizes
         vars: {CONFIG: '{{.CONFIG}}'}
       - echo "experiments:all succeeded for {{.CONFIG}}"
 

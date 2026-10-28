@@ -34,18 +34,19 @@ task experiments:full                        # the full set: every experiment at
 task experiments:full-fresh                  # the full set: delete its outputs, run every experiment
 task experiments:all CONFIG=experiments/simulator_comparison/configs/full.yaml    # one config: run and report everything
 task experiments:run CONFIG=experiments/simulator_comparison/configs/full.yaml
+task experiments:universe-sizes CONFIG=experiments/simulator_comparison/configs/full.yaml    # universe-size backtests, then the blog
 task experiments:timing GPU_URL=http://127.0.0.1:8080 CPU_URL=http://127.0.0.1:8081
 ```
 
 `experiments:pilot` and `experiments:full` run every experiment of their set: `experiments:all` of the base, the rebalancing backtest of the risk-averse twin, and the paired comparison of the two backtests. `experiments:pilot` also runs the scenario comparisons and reports of the next-day and long-history twins and pairs each with the base. Their `-fresh` variants first delete every output of the set's configs.
 
-`experiments:fresh` deletes every output the config names (scenario results, report, and blog figures, rebalancing results, report, and universes; [`clean.py`](clean.py) prints each path) and then runs `experiments:all`: the scenario comparison, its report, the rebalancing backtests with their report, and the [blog figures](#blog). Use it after a change of code or library defaults, which the resumable runs would otherwise refuse or mix into old results. To continue an interrupted `experiments:fresh`, run `experiments:all`, which resumes both results files; rerunning `experiments:fresh` would delete what was already measured.
+`experiments:fresh` deletes every output the config names (scenario results, report, and blog figures, rebalancing results, report, and universes, universe-size results and universes; [`clean.py`](clean.py) prints each path) and then runs `experiments:all`: the scenario comparison, its report, the rebalancing backtests with their report, the [universe-size backtests](#universe-sizes), and the [blog figures](#blog). Use it after a change of code or library defaults, which the resumable runs would otherwise refuse or mix into old results. To continue an interrupted `experiments:fresh`, run `experiments:all`, which resumes every results file; rerunning `experiments:fresh` would delete what was already measured.
 
 `experiments:timing` measures JointFM on both devices from scratch with [`timing.yaml`](configs/timing.yaml): one session against `GPU_URL`, one against `CPU_URL`, each set as `JOINTFM_LOCAL_BASE_URL` over `.env`, then the report and its CPU-to-GPU speedup. `.env` must use the local selector or none, because selectors from the process and `.env` count together.
 
 Without Task, the same run is `uv run --extra cuda13 --extra jointfm --extra experiments python -m experiments.simulator_comparison --config <config>`.
 
-A progress bar on stderr counts forecast origins against the whole run, so a resumed run starts at the origins already in the results file, and shows each arm's latest generation time. The rebalancing bar counts runs the same way. When stderr is not a terminal, it refreshes once a minute so a log file stays short.
+A progress bar on stderr counts forecast origins against the whole run, so a resumed run starts at the origins already in the results file, and shows each arm's latest generation time. The rebalancing and universe-size bars count runs the same way. When stderr is not a terminal, it refreshes once a minute so a log file stays short.
 
 Run the arms on an otherwise idle host. The arms at one origin run one after another, but other load on the CPU or the GPUs still shifts their timings.
 
@@ -201,13 +202,26 @@ With `window-independent` it also writes `rebalancing_independence_control.csv`,
 
 Rerunning resumes the results file and re-renders the report; `task experiments:rebalance-report` re-renders it without running anything. Portfolio values follow the library's backtester, which compounds the portfolio's simple returns as `cumprod(1 + R @ w)`, so a short position's full loss reaches the value.
 
+## Universe sizes
+
+```bash
+task experiments:universe-sizes CONFIG=experiments/simulator_comparison/configs/full.yaml
+```
+
+Reads how each simulator's rebalanced portfolio changes with the number of assets it trades. [`universe_sizes.py`](universe_sizes.py) runs the rebalancing backtest of [Rebalancing](#rebalancing) once per trial, size of `universe_sizes.sizes`, and simulator of `universe_sizes.arms`, over `rebalancing.trials` trials, and writes one row per run to `universe_sizes.output`. The task then writes the [blog figures](#blog).
+
+- **Nested universes:** each trial fixes one random order of its assets, from the experiment seed, the trial index, and a stream of its own, and a size trades the first ones of that order. Every smaller universe is thus a subset of every larger one, and the size equal to `assets` trades exactly the rebalancing backtest's universe, run for run.
+- **Pairing:** every size and simulator of a trial share its trading window, scenario seed, and rebalancing settings, so a trial's readings differ across sizes only in the assets traded. Each size calibrates its risk aversion on its own assets, as a trial of that size would.
+- **Results:** the columns of the rebalancing results plus `size`. The run resumes its file and refuses one measured under other conditions, as the rebalancing backtest does; more trials or sizes extend it.
+- **Cost:** the run at the size equal to `assets` costs what the rebalancing run of the same simulator costs; a smaller universe means smaller scenario requests and optimizations. The pilot's sizes measure how the cost grows with the size.
+
 ## Blog
 
 ```bash
 task experiments:blog CONFIG=experiments/simulator_comparison/configs/full.yaml
 ```
 
-The two reports draw every reading of every arm, so they show where JointFM needs to improve as much as where it leads. [`blog.py`](blog.py) draws only the readings a blog post about JointFM builds its story on, from a config's scenario results and rebalancing results and from the JointFM timing results of [`timing.yaml`](configs/timing.yaml) (`TIMING_CONFIG`), into `<output stem>_blog/` beside the scenario results: `pilot_blog/` for the pilot, `full_blog/` for the full set. That folder holds the blog's figures and nothing else: each figure as PNG and SVG, and a CSV of exactly the numbers it draws, which is what the post's text cites. `experiments:all` writes it last, so `experiments:pilot` and `experiments:full` both produce it; it needs both results files, so a twin config has none. It also needs the timing results with JointFM on both devices, so run `experiments:timing` once before the first blog; until then the blog stops with an error that names it.
+The two reports draw every reading of every arm, so they show where JointFM needs to improve as much as where it leads. [`blog.py`](blog.py) draws only the readings a blog post about JointFM builds its story on, from a config's scenario results and rebalancing results and from the JointFM timing results of [`timing.yaml`](configs/timing.yaml) (`TIMING_CONFIG`), into `<output stem>_blog/` beside the scenario results: `pilot_blog/` for the pilot, `full_blog/` for the full set. That folder holds the blog's figures and nothing else: each figure as PNG and SVG, and a CSV of exactly the numbers it draws, which is what the post's text cites. `experiments:all` writes it last, so `experiments:pilot` and `experiments:full` both produce it; it needs the scenario, rebalancing, and universe-size results files, so a twin config has none. It also needs the timing results with JointFM on both devices, so run `experiments:timing` once before the first blog; until then the blog stops with an error that names it.
 
 | Figure | Reading | Results |
 | --- | --- | --- |
@@ -217,6 +231,7 @@ The two reports draw every reading of every arm, so they show where JointFM need
 | `growth` | Mean cumulative return and the mean of each trial's drawdown from its own running peak at every rebalancing date | Rebalancing |
 | `risk_return` | Each simulator's mean annualized volatility against its mean annualized return as a dot, with cash at the backtests' mean risk-free return and the frontier with cash: the line from cash through the simulator whose line from cash is steepest, which any mix of that simulator's portfolio with cash reaches (solid) or reaches by borrowing at the risk-free rate (dashed). The area below it is shaded. | Rebalancing |
 | `performance` | Annualized return and volatility, Sharpe, Sortino, maximum drawdown, and Calmar ratio per simulator, and the trials in which each beat `no_fit-cpu` | Rebalancing |
+| `universe_sizes` | Each simulator's mean total return and mean maximum drawdown over the universe sizes, as lines without intervals: the trading windows' market moves spread every simulator's level alike, so intervals of the levels overlap even where the paired differences are clear. Its CSV holds those differences from `no_fit-cpu` per size, with their intervals, p-values, and the trials each simulator did better in. | Universe sizes |
 | `runtime` | Mean seconds per scenario-generation call per simulator, on its drawn device, with its interval over trials ([Timing](#results)): a call generates every horizon of the config | Scenario |
 | `runtime_devices` | JointFM's mean seconds per next-day request on the CPU and the GPU service, and the median per-trial ratio of CPU over GPU seconds, each with its interval | Timing |
 

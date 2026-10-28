@@ -330,6 +330,57 @@ def run_backtest(
     }
 
 
+def draw_rebalancing_trial(
+    prices: pd.DataFrame, index: int, config: ExperimentConfig
+) -> tuple[Trial, TradingWindow]:
+    """Trial ``index``'s universe, the scenario comparison's draw, and its trading window."""
+    trial = draw_trial(
+        prices,
+        index,
+        seed=config.seed,
+        n_assets=config.assets,
+        n_origins=config.origins,
+        origin_history=config.origin_history,
+        forward=config.forward,
+    )
+    window = draw_trading_window(
+        prices,
+        index,
+        seed=config.seed,
+        trading_days=config.rebalancing.trading_days,
+        look_back_days=config.rebalancing.look_back_days,
+    )
+    return trial, window
+
+
+def verified_backtest(
+    arm: AnyArm,
+    trial: Trial,
+    window: TradingWindow,
+    universe_path: Path,
+    params: CvarParameters,
+    config: ExperimentConfig,
+    risk_free_rates: pd.Series,
+    services: dict[str, dict],
+) -> dict:
+    """``run_backtest``, with every JointFM service it calls checked before and after.
+
+    Raises
+    ------
+    ValueError
+        If a JointFM service the arm calls serves another checkpoint or device
+        than the session started with, before or after the run.
+    """
+    for called in jointfm_calls(arm):
+        verify_jointfm_service(called, services[called.name])
+    row = run_backtest(
+        arm, trial, window, universe_path, params, config, risk_free_rates
+    )
+    for called in jointfm_calls(arm):
+        verify_jointfm_service(called, services[called.name])
+    return row
+
+
 def rebalancing_identity(
     config: ExperimentConfig,
     arms: Sequence[AnyArm],
@@ -408,32 +459,13 @@ def run_rebalancing_experiment(
     )
     for index, arm in progress:
         if index not in trials:
-            trial = draw_trial(
-                prices,
-                index,
-                seed=config.seed,
-                n_assets=config.assets,
-                n_origins=config.origins,
-                origin_history=config.origin_history,
-                forward=config.forward,
-            )
-            window = draw_trading_window(
-                prices,
-                index,
-                seed=config.seed,
-                trading_days=rebalancing.trading_days,
-                look_back_days=rebalancing.look_back_days,
-            )
+            trial, window = draw_rebalancing_trial(prices, index, config)
             universe_path = write_universe(prices, trial, rebalancing.universe_dir)
             params = calibrated_cvar_params(
                 prices[list(trial.assets)], window, rebalancing
             )
             trials = {index: (trial, window, universe_path, params)}
-        for called in jointfm_calls(arm):
-            verify_jointfm_service(called, services[called.name])
-        row = run_backtest(arm, *trials[index], config, rates)
-        for called in jointfm_calls(arm):
-            verify_jointfm_service(called, services[called.name])
+        row = verified_backtest(arm, *trials[index], config, rates, services)
         new = pd.DataFrame([row])
         frame = new if frame is None else pd.concat([frame, new], ignore_index=True)
         write_results(rebalancing.output, frame, metadata)

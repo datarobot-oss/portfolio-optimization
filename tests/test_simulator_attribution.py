@@ -149,6 +149,11 @@ def _config(
                 risk_aversion=1.0,
             ),
         ),
+        universe_sizes=dict(
+            output=tmp_path / "universe_sizes.parquet",
+            arms=("no_fit-cpu",),
+            sizes=(ASSETS,),
+        ),
     )
     values.update(overrides)
     return ExperimentConfig(**values)

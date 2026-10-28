@@ -40,6 +40,7 @@ def test_shipped_configs_are_valid(name):
 def _without_outputs(values):
     rebalancing = values["rebalancing"]
     del values["output"], rebalancing["output"], rebalancing["scenario_results"]
+    del values["universe_sizes"]["output"]
     return values
 
 
@@ -134,6 +135,25 @@ def test_arms_must_be_known_and_unique(arms, message):
 )
 def test_portfolio_sizes_must_increase_and_fit_the_universe(sizes, message):
     values = _shipped("pilot.yaml") | {"portfolio_sizes": sizes}
+    with pytest.raises(ValidationError, match=message):
+        ExperimentConfig.model_validate(values)
+
+
+@pytest.mark.parametrize(
+    "sweep, message",
+    [
+        ({"sizes": [10, 101]}, "exceed the 100 assets"),
+        ({"sizes": [50, 10]}, "strictly increasing"),
+        ({"sizes": [0, 10]}, "positive"),
+        ({"arms": ["gaussian-cpu", "jointfm"]}, "must list no_fit-cpu"),
+        ({"arms": ["no_fit-cpu", "kde-tpu"]}, "Unknown arms"),
+    ],
+)
+def test_universe_sizes_must_increase_fit_the_universe_and_hold_the_window(
+    sweep, message
+):
+    values = _shipped("pilot.yaml")
+    values["universe_sizes"] |= sweep
     with pytest.raises(ValidationError, match=message):
         ExperimentConfig.model_validate(values)
 

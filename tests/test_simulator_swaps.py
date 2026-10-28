@@ -210,6 +210,11 @@ def _run_config(tmp_path, prices_path, arms=RUN_ARMS, **overrides):
                 risk_aversion=1.0,
             ),
         ),
+        universe_sizes=dict(
+            output=tmp_path / "universe_sizes.parquet",
+            arms=("no_fit-cpu",),
+            sizes=(4,),
+        ),
     )
     values.update(overrides)
     return ExperimentConfig(**values)

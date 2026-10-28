@@ -25,6 +25,8 @@ of exactly the numbers it draws.
   cash is steepest (``risk_return_table``).
 - ``performance``: every reading of ``PERFORMANCE_METRICS``, with the number of
   trials in which each simulator did better than replaying the window.
+- ``universe_sizes``: each simulator's mean total return and maximum drawdown
+  over the universe sizes of the nested-subset backtest (``universe_sizes``).
 - ``runtime``: each simulator's mean seconds per scenario-generation call.
 - ``runtime_devices``: JointFM's mean seconds per next-day request on a CPU
   and a GPU service, and their ratio, from a timing configuration's results.
@@ -106,6 +108,7 @@ from .report import ReportOutputs, _check_scores_recorded, _duration
 from .runner import load_prices
 from .scores import PORTFOLIO_CRPS, TRAILING_STD_WINDOW
 from .table import read_results
+from .universe_sizes import complete_universe_runs
 
 # The simulators as the post names them.
 BLOG_NAMES = {
@@ -162,6 +165,8 @@ LEVEL_UNITS = {
     "max_drawdown": "% below the running peak",
     "calmar_ratio": "annualized return over max drawdown",
 }
+# Readings of the rebalanced portfolio drawn over the universe sizes.
+UNIVERSE_SIZE_METRICS = ("total_return", "max_drawdown")
 # Display decimals of a level: percentages to a tenth, ratios to a hundredth.
 PERCENT_DECIMALS = 1
 RATIO_DECIMALS = 2
@@ -325,9 +330,9 @@ def growth_table(
 
 
 def performance_table(
-    per_trial: pd.DataFrame, styles: Sequence[BlogStyle]
+    per_trial: pd.DataFrame, styles: Sequence[BlogStyle], metrics: Sequence[str]
 ) -> pd.DataFrame:
-    """Per drawn simulator and reading of ``PERFORMANCE_METRICS``: level and paired difference.
+    """Per drawn simulator and reading of ``metrics``: level and paired difference.
 
     ``mean``, ``ci_low``, and ``ci_high`` are ``rebalancing_report.summary``'s
     mean over trials and its interval. Against ``REFERENCE_ARM`` each other
@@ -347,14 +352,14 @@ def performance_table(
         }
     )
     better = []
-    for metric in PERFORMANCE_METRICS:
+    for metric in metrics:
         wide = drawn[metric].unstack("arm")
         change = wide.drop(columns=REFERENCE_ARM).sub(wide[REFERENCE_ARM], axis=0)
         wins = change > 0 if METRIC_LABELS[metric][2] == "higher" else change < 0
         better.append(
             wins.sum().rename("trials_better").reset_index().assign(metric=metric)
         )
-    table = levels[levels["metric"].isin(PERFORMANCE_METRICS)].merge(
+    table = levels[levels["metric"].isin(metrics)].merge(
         differences[
             [
                 "metric",
@@ -370,6 +375,27 @@ def performance_table(
     )
     return table.merge(
         pd.concat(better, ignore_index=True), on=["metric", "arm"], how="left"
+    )
+
+
+def universe_size_table(
+    runs: pd.DataFrame, styles: Sequence[BlogStyle], sizes: Sequence[int]
+) -> pd.DataFrame:
+    """``performance_table`` of ``UNIVERSE_SIZE_METRICS`` at every universe size.
+
+    ``runs`` holds the same trials at every size (``complete_universe_runs``),
+    so a simulator's curve over the sizes changes only with the assets traded.
+    """
+    return pd.concat(
+        [
+            performance_table(
+                per_trial_frame(runs[runs["size"] == size]),
+                styles,
+                UNIVERSE_SIZE_METRICS,
+            ).assign(size=size)
+            for size in sizes
+        ],
+        ignore_index=True,
     )
 
 
@@ -623,12 +649,16 @@ def _end_labels(ax, labels: Sequence[tuple[float, float, str]]) -> None:
     """
     low, high = ax.get_ylim()
     gap = LABEL_GAP * (high - low)
+    ordered = sorted(labels, key=itemgetter(1))
     placed: list[float] = []
-    for x, y, text in sorted(labels, key=itemgetter(1)):
+    for _, y, _ in ordered:
         placed.append(max(y, placed[-1] + gap) if placed else y)
+    # An annotation above the axis is not drawn, so the stack moves down instead.
+    overflow = max(placed[-1] - high, 0.0)
+    for (x, _, text), y in zip(ordered, placed):
         ax.annotate(
             text,
-            xy=(x, placed[-1]),
+            xy=(x, y - overflow),
             xytext=(6, 0),
             textcoords="offset points",
             va="center",
@@ -1177,6 +1207,60 @@ def plot_performance(
     return _save(figure, directory, "performance")
 
 
+def plot_universe_sizes(
+    table: pd.DataFrame, styles: Sequence[BlogStyle], directory: Path
+) -> list[Path]:
+    """Mean total return and mean maximum drawdown over the universe sizes, one line per simulator.
+
+    Only the means are drawn: the trading windows' market moves spread every
+    simulator's level alike, so intervals of the levels overlap even where the
+    paired differences of the CSV are clear. The drawdown is drawn below zero,
+    so in both panels a higher line is better.
+    """
+    figure, axes = _figure(12, 5.5, cols=len(UNIVERSE_SIZE_METRICS))
+    sizes = np.sort(table["size"].unique())
+    for ax, metric, sign in zip(axes[0], UNIVERSE_SIZE_METRICS, (1, -1)):
+        labels = []
+        for style in styles:
+            rows = table[(table["metric"] == metric) & (table["arm"] == style.name)]
+            rows = rows.sort_values("size")
+            values = sign * PERCENT * rows["mean"].to_numpy()
+            ax.plot(
+                rows["size"].to_numpy(),
+                values,
+                color=style.color,
+                linewidth=LINE_WIDTH,
+                marker="o",
+                markersize=5,
+                markeredgecolor=SURFACE,
+                zorder=3,
+            )
+            labels.append(
+                (sizes[-1], values[-1], f"{style.inline_label} {values[-1]:+.1f} %")
+            )
+        _target_line(ax, 0)
+        ax.set_xticks(sizes)
+        ax.set_xlim(sizes[0], sizes[-1] + (sizes[-1] - sizes[0]) * 0.3)
+        _end_labels(ax, labels)
+    trials = int(table["trials"].iloc[0])
+    _axis_labels(axes[0, 0], "assets in the universe", "total return (%)")
+    _panel_title(
+        axes[0, 0],
+        "Total return over the backtest",
+        f"mean over {trials} trials, each trading nested subsets of its assets",
+    )
+    _axis_labels(axes[0, 1], "assets in the universe", "maximum drawdown (%)")
+    _panel_title(
+        axes[0, 1],
+        "Maximum drawdown from the running peak",
+        f"mean over {trials} trials of the deepest daily fall below the peak",
+    )
+    _headline(figure, "Rebalanced portfolio by number of assets")
+    _legend(figure, styles, lines=True, reference="zero")
+    _style_text(figure)
+    return _save(figure, directory, "universe_sizes")
+
+
 def write_blog(config: ExperimentConfig, timing_results: Path) -> ReportOutputs:
     """Compute the blog's readings from a configuration's results and write its figures.
 
@@ -1184,7 +1268,9 @@ def write_blog(config: ExperimentConfig, timing_results: Path) -> ReportOutputs:
     measured on, over the trials in which every arm has every origin at every
     horizon; the rebalancing figures read ``config.rebalancing.output``, over
     the trials in which every arm finished, and the risk-free rate file the
-    backtests' cash earned. The device figure reads ``timing_results``, the
+    backtests' cash earned; the universe-size figure reads
+    ``config.universe_sizes.output``, over the trials in which every arm
+    finished at every size. The device figure reads ``timing_results``, the
     results of a timing configuration (``device_runtime_table``). Everything
     goes to ``config.blog_dir``.
 
@@ -1196,7 +1282,9 @@ def write_blog(config: ExperimentConfig, timing_results: Path) -> ReportOutputs:
         results earned cash at another risk-free rate file, the scenario
         results lack ``REFERENCE_ARM``, have too few complete trials or a
         volatility tercile with too few trials, the rebalancing results
-        have too few complete trials, or ``timing_results`` holds a horizon
+        have too few complete trials, the universe-size results are missing,
+        were measured on another price or rate file, or have too few trials
+        complete at every size, or ``timing_results`` holds a horizon
         other than the next day or lacks JointFM on either device.
     """
     frame, metadata = read_results(config.output)
@@ -1228,7 +1316,17 @@ def write_blog(config: ExperimentConfig, timing_results: Path) -> ReportOutputs:
     runs = complete_runs(runs, tuple(run_metadata.identity["arms"]))
     run_styles = blog_styles(per_trial_frame(runs))
     step_days = run_metadata.identity["rebalancing"]["look_forward_window"]
-    performance = performance_table(per_trial_frame(runs), run_styles)
+    performance = performance_table(
+        per_trial_frame(runs), run_styles, PERFORMANCE_METRICS
+    )
+    sweep = config.universe_sizes
+    sized_runs, sized_metadata = read_results(sweep.output)
+    check_prices(config.prices, sized_metadata.identity)
+    check_rates(config.rebalancing.risk_free_rates, sized_metadata.identity)
+    sized_runs = complete_universe_runs(
+        sized_runs, tuple(sized_metadata.identity["arms"]), sweep.sizes
+    )
+    sized_styles = blog_styles(per_trial_frame(sized_runs))
     cash = risk_free_return(
         runs,
         prices.index,
@@ -1242,6 +1340,7 @@ def write_blog(config: ExperimentConfig, timing_results: Path) -> ReportOutputs:
         "growth": growth_table(runs, run_styles, step_days),
         "risk_return": risk_return_table(performance, run_styles, cash),
         "performance": performance,
+        "universe_sizes": universe_size_table(sized_runs, sized_styles, sweep.sizes),
         "runtime": runtime_table(per_trial[NEXT_DAY], styles, experiment),
         "runtime_devices": device_runtime_table(timing_results),
     }
@@ -1258,6 +1357,7 @@ def write_blog(config: ExperimentConfig, timing_results: Path) -> ReportOutputs:
     files += plot_growth(tables["growth"], run_styles, directory)
     files += plot_risk_return(tables["risk_return"], run_styles, directory)
     files += plot_performance(tables["performance"], run_styles, directory)
+    files += plot_universe_sizes(tables["universe_sizes"], sized_styles, directory)
     files += plot_runtime(tables["runtime"], styles, directory)
     files += plot_device_runtime(tables["runtime_devices"], styles, directory)
     return ReportOutputs(files=files, excluded_trials=excluded)

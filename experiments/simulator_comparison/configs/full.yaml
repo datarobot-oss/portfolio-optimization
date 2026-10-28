@@ -45,3 +45,8 @@ rebalancing:                                                     # rebalancing b
     T_tar: 0.5                                                   # upper bound of turnover per re-optimization
     confidence: 0.95                                             # CVaR level; CVaR averages the worst 1 - confidence of scenarios
     risk_aversion: 1.0                                           # base weight of CVaR against expected return, scaled once per trial
+# Rebalancing backtest of nested subsets of the same universes (task experiments:universe-sizes).
+universe_sizes:                                                  # rebalancing backtest over growing universes
+  output: results/simulator_comparison/full_universe_sizes.parquet  # universe-size results (Parquet)
+  arms: [no_fit-cpu, gaussian-cpu, kde-gpu, jointfm]             # simulators backtested at every size
+  sizes: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]               # assets per universe, each the first ones of the trial's fixed asset order

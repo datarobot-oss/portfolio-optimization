@@ -14,6 +14,7 @@ from experiments.simulator_comparison.blog import (
     BLOG_RANKING_SCORES,
     BLOG_SKILL_SCORES,
     DEVICE_RATIO,
+    PERFORMANCE_METRICS,
     REGIME_METRICS,
     RISK_FREE_ROW,
     _dot_groups,
@@ -35,6 +36,9 @@ from experiments.simulator_comparison.regimes import OVERALL, REGIMES
 from experiments.simulator_comparison.runner import run_experiment
 from experiments.simulator_comparison.scores import PortfolioScores, ScenarioScores
 from experiments.simulator_comparison.table import read_results
+from experiments.simulator_comparison.universe_sizes import (
+    run_universe_size_experiment,
+)
 
 ASSETS = 4
 STEP_DAYS = 5
@@ -45,6 +49,7 @@ FIGURES = (
     "growth",
     "risk_return",
     "performance",
+    "universe_sizes",
     "runtime",
     "runtime_devices",
 )
@@ -141,9 +146,9 @@ def test_performance_counts_trials_better_in_each_readings_direction():
         ]
     )
     per_trial = per_trial_frame(frame)
-    table = performance_table(per_trial, blog_styles(per_trial)).set_index(
-        ["metric", "arm"]
-    )
+    table = performance_table(
+        per_trial, blog_styles(per_trial), PERFORMANCE_METRICS
+    ).set_index(["metric", "arm"])
     jointfm = table.xs("jointfm-gpu", level="arm")
     assert jointfm.loc["annualized_volatility", "trials_better"] == 3
     assert jointfm.loc["annualized_return", "trials_better"] == 1
@@ -284,12 +289,18 @@ def blog(tmp_path_factory, module_fake_jointfm):
                 risk_aversion=1.0,
             ),
         ),
+        universe_sizes=dict(
+            output=directory / "universe_sizes.parquet",
+            arms=arms,
+            sizes=(2, ASSETS),
+        ),
     )
     portfolios = PortfolioScores(
         config.portfolio_sizes, config.rebalancing.cvar, config.assets
     )
     run_experiment(config, [ScenarioScores(), portfolios])
     run_rebalancing_experiment(config)
+    run_universe_size_experiment(config)
     return config, write_blog(config, _device_timing(config, module_fake_jointfm))
 
 
@@ -365,6 +376,23 @@ def test_performance_levels_are_the_means_over_runs(blog):
     levels = table[table["metric"] == "max_drawdown"].set_index("arm")["mean"]
     pd.testing.assert_series_equal(
         levels.sort_index(), expected.sort_index(), check_names=False
+    )
+
+
+def test_universe_sizes_read_every_size_and_equal_the_backtest_at_full_size(blog):
+    """The largest size trades the rebalancing backtest's universe, so its levels
+    are the performance figure's."""
+    config, _ = blog
+    table = pd.read_csv(config.blog_dir / "universe_sizes.csv")
+    assert sorted(table["size"].unique()) == list(config.universe_sizes.sizes)
+    assert set(table["metric"]) == {"total_return", "max_drawdown"}
+    assert set(table["arm"]) == {"no_fit-cpu", "gaussian-cpu", "jointfm-cpu"}
+    performance = pd.read_csv(config.blog_dir / "performance.csv")
+    at_full = table[(table["size"] == ASSETS) & (table["metric"] == "max_drawdown")]
+    expected = performance[performance["metric"] == "max_drawdown"]
+    pd.testing.assert_series_equal(
+        at_full.set_index("arm")["mean"].sort_index(),
+        expected.set_index("arm")["mean"].sort_index(),
     )
 
 

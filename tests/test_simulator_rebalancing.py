@@ -19,6 +19,12 @@ from experiments.simulator_comparison.rebalancing_report import (
 )
 from experiments.simulator_comparison.table import read_results
 from experiments.simulator_comparison.trials import draw_trading_window, draw_trial
+from experiments.simulator_comparison.universe_sizes import (
+    asset_order,
+    complete_universe_runs,
+    run_universe_size_experiment,
+    sized_trial,
+)
 
 ROWS = 300
 TRADING_DAYS = 20
@@ -91,6 +97,11 @@ def _config(tmp_path, prices_path, **rebalancing):
         portfolio_sizes=(1, 3),
         horizons=(1,),
         rebalancing=values,
+        universe_sizes=dict(
+            output=tmp_path / "universe_sizes.parquet",
+            arms=ARMS,
+            sizes=(2, 3),
+        ),
     )
 
 
@@ -319,3 +330,64 @@ def test_service_switch_during_a_backtest_is_refused(
     with pytest.raises(ValueError, match="changed during the jointfm-cpu"):
         run_rebalancing_experiment(config)
     assert not config.rebalancing.output.exists()
+
+
+def test_smaller_universes_are_nested_subsets_in_column_order(prices_path):
+    prices = pd.read_csv(prices_path, index_col=0, parse_dates=True)
+    trial = draw_trial(
+        prices, 0, seed=5, n_assets=5, n_origins=2, origin_history=64, forward=8
+    )
+    order = asset_order(trial, 5)
+    assert order == asset_order(trial, 5)
+    assert sorted(order) == sorted(trial.assets)
+    universes = [sized_trial(trial, order, size).assets for size in range(1, 6)]
+    for smaller, larger in zip(universes, universes[1:]):
+        assert set(smaller) < set(larger)
+    for assets in universes:
+        assert list(assets) == [a for a in trial.assets if a in assets]
+    assert universes[-1] == trial.assets
+    with pytest.raises(ValueError, match="does not fit"):
+        sized_trial(trial, order, 6)
+
+
+def test_universe_sizes_share_each_trials_window_and_reproduce_the_full_backtest(
+    tmp_path, prices_path, fake_jointfm
+):
+    """The size equal to assets trades the rebalancing backtest's universe, so
+    its runs equal that backtest's run by run."""
+    fake_jointfm.envelope.n_input = 1000
+    config = _config(tmp_path, prices_path)
+    sweep = run_universe_size_experiment(config, command=["first"])
+
+    sizes = config.universe_sizes.sizes
+    assert len(sweep) == 2 * len(sizes) * len(ARMS)
+    per_trial = sweep.groupby("trial")
+    for column in ("trading_start", "trading_end"):
+        assert (per_trial[column].nunique() == 1).all(), column
+    assert (per_trial["assets_hash"].nunique() == len(sizes)).all()
+    assert (sweep.groupby(["trial", "size"])["assets_hash"].nunique() == 1).all()
+
+    full = run_rebalancing_experiment(config)
+    at_full = sweep[sweep["size"] == config.assets].set_index(["trial", "arm"])
+    full = full.set_index(["trial", "arm"]).loc[at_full.index]
+    assert (at_full["assets_hash"] == full["assets_hash"]).all()
+    for metric in ("total_return", "max_drawdown", "risk_aversion"):
+        np.testing.assert_allclose(at_full[metric], full[metric], rtol=1e-9)
+
+    again = run_universe_size_experiment(config, command=["again"])
+    assert len(again) == len(sweep)
+
+
+def test_only_trials_complete_at_every_size_are_read():
+    rows = [
+        {"trial": trial, "size": size, "arm": arm}
+        for trial in range(3)
+        for size in (2, 3)
+        for arm in ("no_fit-cpu", "gaussian-cpu")
+        if not (trial == 2 and size == 3)
+    ]
+    frame = pd.DataFrame(rows)
+    kept = complete_universe_runs(frame, ("no_fit-cpu", "gaussian-cpu"), (2, 3))
+    assert sorted(kept["trial"].unique()) == [0, 1]
+    with pytest.raises(ValueError, match="every universe size"):
+        complete_universe_runs(frame[frame["trial"] == 0], ("no_fit-cpu",), (2, 3))

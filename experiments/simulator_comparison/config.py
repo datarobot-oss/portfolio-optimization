@@ -172,6 +172,61 @@ class RebalancingConfig(BaseModel):
         return self.output.with_name(f"{self.output.stem}_universes")
 
 
+class UniverseSizesConfig(BaseModel):
+    """Rebalancing backtest of nested asset subsets of every trial's universe."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    output: Path = Field(
+        description="Results Parquet file of the universe-size runs, one row per "
+        "trial, size, and arm, resumed like the rebalancing results; the blog "
+        "reads it. Only a base config's task experiments:universe-sizes writes "
+        "it, so a twin names a file of its own that nothing runs."
+    )
+    arms: tuple[str, ...] = Field(
+        min_length=1,
+        description=f"Simulators to backtest at every size, named as in "
+        f"rebalancing.arms; the blog draws each against {WINDOW_ARM}, so it must "
+        f"be listed.",
+    )
+    sizes: tuple[int, ...] = Field(
+        min_length=1,
+        description="Assets per universe, strictly increasing and at most assets. "
+        "Each trial fixes one random order of its assets, and a size trades the "
+        "first ones of it, so every smaller universe is a subset of every larger "
+        "one; size assets trades exactly the rebalancing backtest's universe. "
+        "Every size of a trial shares its trading window, scenario seed, and "
+        "rebalancing settings, while its risk aversion is calibrated on its own "
+        "assets. Each size adds one run per trial and arm, at rebalancing.trials "
+        "trials.",
+    )
+
+    @field_validator("arms")
+    @classmethod
+    def known_unique_arms(cls, arms: tuple[str, ...]) -> tuple[str, ...]:
+        if WINDOW_ARM not in arms:
+            raise ValueError(
+                f"universe_sizes.arms must list {WINDOW_ARM}, which the blog "
+                f"reads every simulator against."
+            )
+        return _known_unique_arms(arms)
+
+    @field_validator("sizes")
+    @classmethod
+    def increasing_sizes(cls, sizes: tuple[int, ...]) -> tuple[int, ...]:
+        if sizes[0] < 1 or any(b <= a for a, b in zip(sizes, sizes[1:])):
+            raise ValueError(
+                f"universe_sizes.sizes {list(sizes)} must be positive and strictly "
+                f"increasing."
+            )
+        return sizes
+
+    @property
+    def universe_dir(self) -> Path:
+        """Per-trial, per-size price CSVs, which rebalance_portfolio reads by path."""
+        return self.output.with_name(f"{self.output.stem}_universes")
+
+
 class ExperimentConfig(BaseModel):
     """Parameters of one simulator-comparison run."""
 
@@ -258,6 +313,11 @@ class ExperimentConfig(BaseModel):
         description="Rebalancing backtest of the same trials' universes, run by "
         "its own task after or beside the scenario comparison."
     )
+    universe_sizes: UniverseSizesConfig = Field(
+        description="Rebalancing backtest of nested asset subsets of the same "
+        "trials' universes over the rebalancing settings, run by task "
+        "experiments:universe-sizes for a base config; a twin carries it unused."
+    )
 
     @field_validator("arms")
     @classmethod
@@ -282,6 +342,16 @@ class ExperimentConfig(BaseModel):
             raise ValueError(
                 f"portfolio_sizes {list(sizes)} exceed the {self.assets} assets of "
                 f"a trial."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def universe_sizes_fit(self) -> "ExperimentConfig":
+        sizes = self.universe_sizes.sizes
+        if sizes[-1] > self.assets:
+            raise ValueError(
+                f"universe_sizes.sizes {list(sizes)} exceed the {self.assets} assets "
+                f"of a trial."
             )
         return self
 
@@ -318,7 +388,7 @@ class ExperimentConfig(BaseModel):
         windows = {
             "look_back": (self.arms, self.look_back),
             "rebalancing.look_back_days": (
-                self.rebalancing.arms,
+                (*self.rebalancing.arms, *self.universe_sizes.arms),
                 self.rebalancing.look_back_days,
             ),
         }

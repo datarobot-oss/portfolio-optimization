@@ -345,6 +345,11 @@ def _figure_config(directory, prices_path, name, scenario_results, risk_aversion
                 risk_aversion=risk_aversion,
             ),
         ),
+        universe_sizes=dict(
+            output=directory / f"{name}_universe_sizes.parquet",
+            arms=("no_fit-cpu",),
+            sizes=(FIGURE_ASSETS,),
+        ),
     )
 
 
