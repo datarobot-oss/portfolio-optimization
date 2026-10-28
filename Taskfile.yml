@@ -31,6 +31,9 @@ vars:
   LOCK_STATUS: >-
     git diff --quiet -- uv.lock && echo "uv.lock has no uncommitted changes"
     || echo "uv.lock has uncommitted changes: review git diff uv.lock and commit it"
+  # Scanner images: docker resolves the digest and ignores the tag, which is kept for readers.
+  GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+  OSV_SCANNER_IMAGE: ghcr.io/google/osv-scanner:v2.7.0@sha256:4f3b7e2c64b9d38a5febc5a7e4a3dfef1d1362f726dea7a2ef4762b46469fcd0
 
 tasks:
   default:
@@ -74,6 +77,24 @@ tasks:
     cmds:
       - uv run --group dev pre-commit run --all-files
       - echo "pre-commit succeeded"
+
+  secret-scan:
+    desc: >-
+      Fail when gitleaks finds a credential in any commit of the git history
+      (needs docker)
+    cmds:
+      - docker run --rm -v "$PWD:/repo" {{.GITLEAKS_IMAGE}} git /repo --redact --no-banner
+      - echo "secret-scan succeeded"
+
+  vuln-scan:
+    desc: >-
+      Fail when a package pinned in uv.lock has a known vulnerability, scanned
+      by osv-scanner with the waivers of osv-scanner.toml (needs docker)
+    cmds:
+      - >-
+        docker run --rm -v "$PWD:/src" {{.OSV_SCANNER_IMAGE}} scan source
+        --config /src/osv-scanner.toml --lockfile /src/uv.lock
+      - echo "vuln-scan succeeded"
 
   experiments:run:
     desc: >-

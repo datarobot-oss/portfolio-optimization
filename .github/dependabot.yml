@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 DataRobot, Inc. and its affiliates. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Bundle every version bump for this ecosystem into one PR.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    # Hold back fresh releases so a compromised or yanked one is caught upstream first.
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    # Bundle every version bump for this ecosystem into one PR.
+    groups:
+      uv:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    # Hold back fresh releases so a compromised or yanked one is caught upstream first.
+    cooldown:
+      default-days: 7

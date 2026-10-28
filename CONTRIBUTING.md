@@ -98,6 +98,8 @@ There are many ways to contribute to the portfolio optimization developer exampl
 
    The hooks cover formatting (`ruff format`), linting (`ruff check`), shell script checks (`shellcheck`), YAML validation (`yamllint`), GitHub Actions security scanning (`zizmor`), skill manifest validation, and the pytest suite (only when source, tests, experiments, skills, data, or dependencies change). The same hooks run in CI via the `Checks` workflow on every PR, except pytest, which the test jobs run instead.
 
+   Three security controls run in CI on every PR, every push to `main`, and weekly, since new advisories and CodeQL queries land without a code change. The `CodeQL` workflow analyzes the Python code and the workflow files. The `Security` workflow runs `task secret-scan`, which fails when gitleaks finds a credential in any commit of the history, and `task vuln-scan`, which fails when a package pinned in `uv.lock` has a known vulnerability. Both tasks need docker. Fix a `vuln-scan` failure by upgrading the affected package in the lock (`uv lock --upgrade-package <name>`). Waive an advisory in `osv-scanner.toml`, with an expiry date, only while no release the lock can resolve fixes it. Dependabot (`.github/dependabot.yml`) opens weekly grouped updates for the GitHub Actions and the `uv.lock` pins, and proposes a release only after its cooldown has passed, so a compromised or yanked release is caught upstream before it reaches a PR.
+
 ### Docker Development (Recommended)
 
 For a consistent development environment with all GPU dependencies:

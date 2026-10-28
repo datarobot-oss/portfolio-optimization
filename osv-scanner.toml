@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 DataRobot, Inc. and its affiliates. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Advisories osv-scanner may ignore in uv.lock. Each entry must carry an
+# ignoreUntil date so a waiver lapses on its own and the scan fails again.
+# Use one only while no release the lock can resolve fixes the advisory, for
+# example when the fix sits outside a version pin in pyproject.toml; bump the
+# lock once a fix becomes reachable.
