@@ -29,7 +29,7 @@ PILOT_TWINS = ["next_day", "long_history"]
     [f"{base}.yaml" for base in SETS]
     + [f"{base}_risk_averse.yaml" for base in SETS]
     + [f"pilot_{twin}.yaml" for twin in PILOT_TWINS]
-    + ["timing.yaml"],
+    + ["timing.yaml", "readout.yaml"],
 )
 def test_shipped_configs_are_valid(name):
     config = load_config(CONFIG_DIR / name)
@@ -48,7 +48,7 @@ def _without_outputs(values):
     "name",
     [f"{base}.yaml" for base in SETS]
     + [f"pilot_{twin}.yaml" for twin in PILOT_TWINS]
-    + ["timing.yaml"],
+    + ["timing.yaml", "readout.yaml"],
 )
 def test_report_reads_the_size_curves_of_its_own_scenario_comparison(name):
     config = load_config(CONFIG_DIR / name)
@@ -82,6 +82,18 @@ def test_next_day_twin_differs_only_in_horizons_and_outputs():
     for values in (base, twin):
         del values["horizons"]
     assert _without_outputs(twin) == _without_outputs(base)
+
+
+def test_readout_draws_the_full_runs_trials_at_the_next_day():
+    """Its rows pair with the full run's next day, read against the window alone."""
+    full = load_config(CONFIG_DIR / "full.yaml")
+    readout = load_config(CONFIG_DIR / "readout.yaml")
+    drawn = ("prices", "seed", "trials", "assets", "origins", "origin_history")
+    for field in (*drawn, "forward", "look_back", "portfolio_sizes"):
+        assert getattr(readout, field) == getattr(full, field), field
+    assert readout.arms == ("no_fit-cpu", "jointfm")
+    assert readout.horizons == (1,)
+    assert readout.output != full.output
 
 
 @pytest.mark.parametrize("base_name", SETS)

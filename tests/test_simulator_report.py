@@ -28,6 +28,11 @@ from experiments.simulator_comparison.arms import (
     SWAP_DONORS,
 )
 from experiments.simulator_comparison.config import CvarConfig
+from experiments.simulator_comparison.dilution import (
+    dilution_lines,
+    fit_line,
+    origin_points,
+)
 from experiments.simulator_comparison.portfolio_analysis import (
     breach_band,
     portfolio_pit,
@@ -458,6 +463,120 @@ class TestRegimes:
             check_prices(other, identity)
 
 
+# Planted dilution: jointfm's bias is this line of the window correlation.
+DILUTION_INTERCEPT = -0.036
+DILUTION_SLOPE = -0.48
+DILUTION_NOISE = 0.01
+DILUTION_TRIALS = 40
+
+
+@pytest.fixture()
+def dilution_rows():
+    """Next-day bias rows on the planted line, and their origins' features."""
+    rng = np.random.default_rng(2)
+    origins = pd.bdate_range("2015-01-01", periods=ORIGINS)
+    keys = pd.MultiIndex.from_product(
+        [range(DILUTION_TRIALS), origins], names=["trial", "origin"]
+    )
+    window = rng.uniform(0.1, 0.6, size=len(keys))
+    features = pd.DataFrame(
+        {
+            "window_correlation": window,
+            "volatility_ratio": rng.uniform(0.7, 1.4, size=len(keys)),
+            "correlation_change": rng.normal(0.0, 0.1, size=len(keys)),
+        },
+        index=keys,
+    )
+    bias = {
+        "no_fit-cpu": np.zeros(len(keys)),
+        "jointfm-gpu": DILUTION_INTERCEPT
+        + DILUTION_SLOPE * window
+        + rng.normal(0.0, DILUTION_NOISE, size=len(keys)),
+    }
+    frame = pd.concat(
+        [
+            keys.to_frame(index=False).assign(
+                arm=arm, horizon=1, corr_bias_trailing=values
+            )
+            for arm, values in bias.items()
+        ],
+        ignore_index=True,
+    )
+    return frame, features
+
+
+class TestDilution:
+    def test_planted_line_is_recovered(self, dilution_rows):
+        frame, features = dilution_rows
+        regimes, _ = terciles(features)
+        lines = dilution_lines(frame, features, regimes).set_index(
+            ["feature", "regime", "arm"]
+        )
+        jointfm = lines.loc[(OVERALL, OVERALL, "jointfm-gpu")]
+        assert jointfm["intercept"] == pytest.approx(DILUTION_INTERCEPT, abs=0.01)
+        assert jointfm["slope"] == pytest.approx(DILUTION_SLOPE, abs=0.02)
+        assert jointfm["forecast_slope"] == pytest.approx(1 + jointfm["slope"])
+        assert jointfm["slope_low"] < DILUTION_SLOPE < jointfm["slope_high"]
+        assert jointfm["intercept_low"] < DILUTION_INTERCEPT < jointfm["intercept_high"]
+        assert jointfm["origins"] == DILUTION_TRIALS * ORIGINS
+        window = lines.loc[(OVERALL, OVERALL, "no_fit-cpu")]
+        assert window["intercept"] == pytest.approx(0.0, abs=1e-12)
+        assert window["slope"] == pytest.approx(0.0, abs=1e-12)
+
+    def test_fit_equals_least_squares_over_all_origins(self, dilution_rows):
+        frame, features = dilution_rows
+        points = origin_points(frame, features)
+        cell = points[points["arm"] == "jointfm-gpu"]
+        (intercept, slope), resamples = fit_line(cell, "jointfm-gpu")
+        expected_slope, expected_intercept = np.polyfit(
+            cell["window_correlation"], cell["corr_bias_trailing"], 1
+        )
+        assert slope == pytest.approx(expected_slope)
+        assert intercept == pytest.approx(expected_intercept)
+        assert resamples.shape[1] == 2
+
+    def test_every_regime_holds_its_origins(self, dilution_rows):
+        frame, features = dilution_rows
+        regimes, _ = terciles(features)
+        lines = dilution_lines(frame, features, regimes)
+        assert len(lines) == (1 + len(FEATURES) * len(REGIMES)) * 2
+        per_feature = lines[lines["arm"] == "jointfm-gpu"].groupby("feature")
+        assert (per_feature["origins"].sum() == DILUTION_TRIALS * ORIGINS).all()
+
+    def test_one_window_correlation_is_refused(self, dilution_rows):
+        frame, features = dilution_rows
+        features["window_correlation"] = 0.3
+        with pytest.raises(ValueError, match="no line"):
+            fit_line(origin_points(frame, features), "every arm")
+
+    def test_resample_without_a_line_leaves_the_interval_undefined(self, dilution_rows):
+        """Each regime holds one origin of each of two trials, so half its
+        resamples draw one origin twice; all origins together keep a line."""
+        frame, features = dilution_rows
+        two = frame[frame["trial"] < 2]
+        position = features.groupby("trial").cumcount().to_numpy()
+        regimes = pd.DataFrame(
+            {feature: np.array(REGIMES)[position] for feature in FEATURES},
+            index=features.index,
+        )
+        lines = dilution_lines(two, features, regimes)
+        jointfm = lines[lines["arm"] == "jointfm-gpu"].set_index(["feature", "regime"])
+        bounds = ["slope_low", "slope_high", "intercept_low", "intercept_high"]
+        overall = jointfm.loc[(OVERALL, OVERALL)]
+        assert overall["undefined_resamples"] == 0
+        assert np.isfinite(overall[bounds].to_numpy(float)).all()
+        thin = jointfm.drop(index=(OVERALL, OVERALL))
+        assert (thin["undefined_resamples"] > 0).all()
+        assert np.isfinite(thin["slope"]).all()
+        assert thin[bounds].isna().all().all()
+
+    def test_rows_of_two_horizons_are_refused(self, dilution_rows):
+        frame, features = dilution_rows
+        both = pd.concat([frame, frame.assign(horizon=5)], ignore_index=True)
+        with pytest.raises(ValueError, match="one horizon"):
+            origin_points(both, features)
+
+
 class TestReport:
     def test_every_file_is_written(self, report):
         outputs, directory = report
@@ -470,6 +589,7 @@ class TestReport:
             "calibration_reliability",
             "timing",
             *(f"regimes_{feature}" for feature in FEATURES),
+            "dilution",
             "portfolio_sizes",
             "portfolio_pit_equal",
             "portfolio_pit_long_only",
@@ -492,6 +612,7 @@ class TestReport:
             "regime_skill",
             "regime_ranking",
             "regime_portfolio_sizes",
+            "dilution",
             "portfolio_sizes",
             "portfolio_pit",
         ]

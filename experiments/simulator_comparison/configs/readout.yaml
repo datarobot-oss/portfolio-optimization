@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 DataRobot, Inc. and its affiliates. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Simulator-comparison configuration; experiments/simulator_comparison/config.py
+# describes every field. Paths are relative to the repository root; services
+# and GPUs come from .env, as for any user of the library.
+#
+# Checkpoint readout: the real-panel readings of the one checkpoint the JointFM
+# service serves, against the window alone, at the next day only (task
+# experiments:readout). It draws full.yaml's trials, origins, and scenario
+# seeds, since those read only prices, seed, assets, origins, origin_history,
+# and forward, so its rows pair with the full run's next day trial by trial;
+# its scenarios differ, because num_scen does too. A results file holds one
+# checkpoint; task experiments:readout-fresh starts over for the next one.
+
+prices: data/stock_data/sp500.csv
+output: results/simulator_comparison/readout.parquet
+trials: 200
+origins: 4
+assets: 100
+look_back: 252
+origin_history: 731
+forward: 63
+num_scen: 10000
+seed: 0
+arms: [no_fit-cpu, jointfm]
+portfolio_sizes: [1, 2, 5, 10, 25, 50, 100]
+horizons: [1]
+# The readout runs no backtest; the sections below are required by the schema
+# and name files of their own that nothing writes.
+rebalancing:
+  output: results/simulator_comparison/readout_rebalancing.parquet
+  scenario_results: results/simulator_comparison/readout.parquet
+  arms: [no_fit-cpu, jointfm]
+  trials: 60
+  trading_days: 378
+  look_forward_window: 21
+  # Calendar days, as rebalance_portfolio counts the look-back window.
+  look_back_days: 365
+  trigger: every_step
+  pct_change_threshold: -0.005
+  transaction_cost: 0.001
+  risk_free_rates: data/rates/dtb3.csv
+  solver: CUOPT
+  cvar:
+    w_min: -0.3
+    w_max: 0.8
+    c_min: 0.1
+    c_max: 0.2
+    L_tar: 1.6
+    T_tar: 0.5
+    confidence: 0.95
+    risk_aversion: 1.0
+universe_sizes:
+  output: results/simulator_comparison/readout_universe_sizes.parquet
+  arms: [no_fit-cpu, jointfm]
+  sizes: [10, 50, 100]

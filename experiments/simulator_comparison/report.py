@@ -10,7 +10,8 @@ distribution and by two scores that react to wrong dependence, the variogram
 score and the portfolio CRPS), how the portfolio readings change with the
 portfolio size (``portfolio_analysis``), how every reading changes across
 market regimes of the origins (``regimes``) and over the horizons after the
-origin, and what each arm costs to generate. With the dependence swap arms
+origin, how each arm's correlation bias grows with the window's correlation
+(``dilution``), and what each arm costs to generate. With the dependence swap arms
 (``swaps``) it also splits every reading into what JointFM's marginals and
 its dependence cause (``swap_effects.csv``), and draws the splits of the
 scores over the horizons and of the portfolio readings over the portfolio
@@ -57,6 +58,7 @@ from .analysis import (
     timing,
 )
 from .config import load_config
+from .dilution import dilution_lines, plot_dilution
 from .plotting import (
     GRID,
     INDEPENDENCE_FIGURES,
@@ -855,6 +857,9 @@ def write_report(
         "speedup": speedups,
         "origin_features": features.join(regimes, rsuffix="_regime").reset_index(),
         "regimes": bounds,
+        "dilution": stack_horizons(
+            {h: dilution_lines(rows, features, regimes) for h, rows in frames.items()}
+        ),
         **{
             f"regime_{name}": stack_horizons(
                 {h: by_name[name] for h, by_name in regime_tables.items()}
@@ -878,6 +883,7 @@ def write_report(
     files += plot_reliability(reliability(next_day), styles, output_dir)
     files += plot_timing(frames[1], means, speedups, styles, output_dir)
     files += plot_regimes(regime_tables[1], bounds, styles, output_dir)
+    files += plot_dilution(frames[1], features, styles, output_dir)
     files += plot_portfolio_sizes(readings["portfolio_sizes"][1], styles, output_dir)
     files += plot_portfolio_pit(readings["portfolio_pit"][1], styles, output_dir)
     files += plot_horizons(stacked, styles, output_dir)
@@ -933,7 +939,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{outputs.excluded_trials}"
         )
     with pd.option_context("display.width", 160, "display.precision", 3):
-        for name in ("ranking", "skill", "speedup", "regimes"):
+        for name in ("ranking", "skill", "speedup", "regimes", "dilution"):
             print(f"\n{name}:\n{pd.read_csv(output_dir / f'{name}.csv').to_string()}")
     print(
         f"\nSimulator comparison report finished: {len(outputs.files)} files in "

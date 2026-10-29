@@ -162,6 +162,7 @@ def saved_figures(monkeypatch):
 
     from experiments.simulator_comparison import (
         chosen_report,
+        dilution,
         portfolio_report,
         rebalancing_report,
         report,
@@ -173,6 +174,12 @@ def saved_figures(monkeypatch):
         texts[name] = "\n".join(text.get_text() for text in figure.findobj(Text))
         return [directory / f"{name}.png", directory / f"{name}.svg"]
 
-    for module in (report, portfolio_report, rebalancing_report, chosen_report):
+    for module in (
+        report,
+        dilution,
+        portfolio_report,
+        rebalancing_report,
+        chosen_report,
+    ):
         monkeypatch.setattr(module, "_save", record)
     return texts

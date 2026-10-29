@@ -187,6 +187,40 @@ def _skill(per_trial: pd.DataFrame) -> pd.DataFrame:
     return skill_summary(skill(per_trial))
 
 
+def regime_cells(
+    frame: pd.DataFrame, regimes: pd.DataFrame
+) -> list[tuple[str, str, np.ndarray]]:
+    """The rows of all origins and of every (feature, regime) of ``terciles``.
+
+    Returns
+    -------
+    list of tuple
+        (feature, regime, row mask of ``frame``), first ``OVERALL`` for all
+        origins, then each feature's ``REGIMES``, low to high.
+
+    Raises
+    ------
+    ValueError
+        If an origin of ``frame`` has no regime, or a regime holds fewer than
+        ``MIN_TRIALS`` trials.
+    """
+    keys = pd.MultiIndex.from_frame(frame[["trial", "origin"]])
+    cells = [(OVERALL, OVERALL, np.ones(len(frame), dtype=bool))]
+    for feature in FEATURES:
+        of_row = regimes[feature].reindex(keys)
+        if of_row.isna().any():
+            raise ValueError(f"Some origins have no {feature} regime.")
+        cells += [(feature, name, (of_row == name).to_numpy()) for name in REGIMES]
+    for feature, name, mask in cells:
+        trials = frame.loc[mask, "trial"].nunique()
+        if trials < MIN_TRIALS:
+            raise ValueError(
+                f"The {name} {feature} regime holds {trials} trials; its readings "
+                f"need at least {MIN_TRIALS}."
+            )
+    return cells
+
+
 # How each reading repeated per regime is read off a cell's per-trial table.
 READINGS = {
     "summary": _scores,
@@ -228,22 +262,9 @@ def regime_readings(
     unknown = sorted(set(readings) - set(READINGS))
     if unknown:
         raise ValueError(f"Unknown regime readings {unknown}; known: {list(READINGS)}.")
-    keys = pd.MultiIndex.from_frame(frame[["trial", "origin"]])
-    cells = [(OVERALL, OVERALL, np.ones(len(frame), dtype=bool))]
-    for feature in FEATURES:
-        of_row = regimes[feature].reindex(keys)
-        if of_row.isna().any():
-            raise ValueError(f"Some origins have no {feature} regime.")
-        cells += [(feature, name, (of_row == name).to_numpy()) for name in REGIMES]
     tables = {name: [] for name in readings}
-    for feature, name, mask in cells:
+    for feature, name, mask in regime_cells(frame, regimes):
         per_trial = aggregate(frame[mask])
-        trials = per_trial.index.get_level_values("trial").nunique()
-        if trials < MIN_TRIALS:
-            raise ValueError(
-                f"The {name} {feature} regime holds {trials} trials; its readings "
-                f"need at least {MIN_TRIALS}."
-            )
         for reading in readings:
             tables[reading].append(
                 READINGS[reading](per_trial)

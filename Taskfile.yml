@@ -324,6 +324,28 @@ tasks:
       - task: experiments:pilot
       - echo "experiments:pilot-fresh succeeded"
 
+  experiments:readout:
+    desc: >-
+      Real-panel readout of the checkpoint the JointFM service serves
+      (readout.yaml): its scenario comparison and report, resuming its results
+      file
+    cmds:
+      - task: experiments:run
+        vars: {CONFIG: '{{.CONFIG_DIR}}/readout.yaml'}
+      - task: experiments:report
+        vars: {CONFIG: '{{.CONFIG_DIR}}/readout.yaml'}
+      - echo "experiments:readout succeeded"
+
+  experiments:readout-fresh:
+    desc: >-
+      Delete every output of experiments:readout, then read the checkpoint
+      the JointFM service now serves from scratch
+    cmds:
+      - task: experiments:clean-configs
+        vars: {NAMES: readout}
+      - task: experiments:readout
+      - echo "experiments:readout-fresh succeeded"
+
   experiments:full:
     desc: >-
       Every experiment at full size (full.yaml and its risk-averse twin),
