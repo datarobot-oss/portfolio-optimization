@@ -607,13 +607,13 @@ def _axis_labels(ax, x: str, y: str) -> None:
 
 
 def _legend(
-    figure, styles: Sequence[BlogStyle], *, lines: bool, reference: str
+    figure, styles: Sequence[BlogStyle], *, lines: bool, reference: str | None
 ) -> None:
     """One entry per simulator below the panels, as a line or as a marker.
 
     A last entry names the dark horizontal line every panel draws
     (``_target_line``) as ``reference``; a label inside the panels would
-    collide with the marks near it.
+    collide with the marks near it. ``None`` is for a figure without that line.
     """
     handles = [
         Line2D(
@@ -630,7 +630,10 @@ def _legend(
         )
         for style in styles
     ]
-    handles.append(Line2D([], [], color=INK_SECONDARY, linewidth=1, label=reference))
+    if reference is not None:
+        handles.append(
+            Line2D([], [], color=INK_SECONDARY, linewidth=1, label=reference)
+        )
     figure.legend(
         handles=handles,
         loc="outside lower center",
@@ -844,8 +847,6 @@ def plot_growth(
         labels.append(
             (days[-1], returns[-1], f"{style.inline_label} {returns[-1]:+.1f} %")
         )
-    _target_line(top, 0)
-    _target_line(bottom, 0)
     steps = growth["trading_day"].unique()
     top.set_xticks(steps[::GROWTH_TICK_STEPS])
     top.set_xlim(steps[0], steps[-1] * 1.25)
@@ -863,7 +864,7 @@ def plot_growth(
         f"mean over {trials} trials of how far each lies below its highest value so far",
     )
     _headline(figure, "Rebalanced portfolio over the backtest")
-    _legend(figure, styles, lines=True, reference="starting value")
+    _legend(figure, styles, lines=True, reference=None)
     _style_text(figure)
     return _save(figure, directory, "growth")
 
@@ -1238,7 +1239,6 @@ def plot_universe_sizes(
             labels.append(
                 (sizes[-1], values[-1], f"{style.inline_label} {values[-1]:+.1f} %")
             )
-        _target_line(ax, 0)
         ax.set_xticks(sizes)
         ax.set_xlim(sizes[0], sizes[-1] + (sizes[-1] - sizes[0]) * 0.3)
         _end_labels(ax, labels)
@@ -1256,7 +1256,7 @@ def plot_universe_sizes(
         f"mean over {trials} trials of the deepest daily fall below the peak",
     )
     _headline(figure, "Rebalanced portfolio by number of assets")
-    _legend(figure, styles, lines=True, reference="zero")
+    _legend(figure, styles, lines=True, reference=None)
     _style_text(figure)
     return _save(figure, directory, "universe_sizes")
 
