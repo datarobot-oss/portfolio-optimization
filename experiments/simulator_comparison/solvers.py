@@ -56,8 +56,9 @@ class Solver:
         return {"solver": self.backend, "verbose": False, **dict(self.options)}
 
 
-# cuOpt's method option names a member of cuopt's SolverMethod; CVXPY ignores a
-# name it cannot resolve, so check_cuopt_methods verifies them before a run.
+# cuOpt's method option names a member of cuopt's SolverMethod and its other
+# options name cuOpt parameters; CVXPY ignores a name it cannot resolve, so
+# check_cuopt_options verifies them before a run.
 SOLVERS = (
     Solver(
         "CUOPT",
@@ -74,7 +75,9 @@ SOLVERS = (
         "CUOPT",
         "GPU",
         True,
-        (("solver_method", "Barrier"),),
+        # Every scenario row holds every weight, so the default normal
+        # equations are dense in the scenarios and exhaust GPU memory.
+        (("solver_method", "Barrier"), ("augmented", "1")),
         "cuopt",
     ),
     Solver(
@@ -99,36 +102,51 @@ def solver_settings(name: str) -> dict:
     return SOLVERS_BY_NAME[name].settings()
 
 
-def check_cuopt_methods(names: tuple[str, ...]) -> None:
-    """Refuse a cuOpt solver whose method name cuOpt does not know.
+def check_cuopt_options(names: tuple[str, ...]) -> None:
+    """Refuse a cuOpt solver whose method or option name cuOpt does not know.
 
-    CVXPY drops a method name it cannot resolve and solves with cuOpt's
-    default method instead, so a misspelled method would time another
-    algorithm under this solver's name. Imports cuOpt, so call it only after
-    the process's GPU selection is applied.
+    CVXPY drops a method name it cannot resolve and every option that is not
+    a cuOpt parameter, then solves with cuOpt's defaults instead, so a
+    misspelled name would time another configuration under this solver's
+    name. Imports cuOpt, so call it only after the process's GPU selection is
+    applied.
 
     Raises
     ------
     ValueError
         If a named cuOpt solver's ``solver_method`` is not a member of
-        cuOpt's ``SolverMethod``.
+        cuOpt's ``SolverMethod``, or another of its options is not a cuOpt
+        parameter.
     """
-    methods = {
-        name: dict(SOLVERS_BY_NAME[name].options)["solver_method"]
+    options = {
+        name: dict(SOLVERS_BY_NAME[name].options)
         for name in names
         if SOLVERS_BY_NAME[name].backend == CUOPT_BACKEND
     }
-    if not methods:
+    if not options:
         return
+    from cuopt.linear_programming.solver import solver_parameters
     from cuopt.linear_programming.solver_settings import SolverMethod
 
-    unknown = {
-        name: method
-        for name, method in methods.items()
-        if method not in SolverMethod.__members__
+    unknown_methods = {
+        name: chosen["solver_method"]
+        for name, chosen in options.items()
+        if chosen["solver_method"] not in SolverMethod.__members__
     }
-    if unknown:
+    if unknown_methods:
         raise ValueError(
-            f"cuOpt knows no method {unknown}; choose from "
+            f"cuOpt knows no method {unknown_methods}; choose from "
             f"{list(SolverMethod.__members__)}."
         )
+    parameters = {
+        value
+        for key, value in vars(solver_parameters).items()
+        if key.startswith("CUOPT_") and isinstance(value, str)
+    }
+    unknown_options = {
+        name: sorted(set(chosen) - {"solver_method"} - parameters)
+        for name, chosen in options.items()
+        if set(chosen) - {"solver_method"} - parameters
+    }
+    if unknown_options:
+        raise ValueError(f"cuOpt knows no option {unknown_options}.")

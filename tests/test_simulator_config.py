@@ -193,9 +193,13 @@ def test_horizons_start_at_the_next_day_and_fit_the_forward_window(horizons, mes
 
 @pytest.mark.parametrize("name", ["devices.yaml", "devices_pilot.yaml"])
 def test_shipped_devices_configs_measure_the_full_backtests_decisions(name):
-    """The pilot runs the first of the full run's trials with the same pipelines."""
+    """The pilot runs the first of the full run's trials with the same pipelines.
+
+    Both time decisions of the size the backtest solved.
+    """
     devices, experiment = load_devices_config(CONFIG_DIR / name)
     assert experiment == load_config(CONFIG_DIR / "full.yaml")
+    assert devices.num_scen == experiment.num_scen
     assert devices.report_dir.name == f"{devices.output.stem}_report"
     full, _ = load_devices_config(CONFIG_DIR / "devices.yaml")
     assert devices.trials <= full.trials

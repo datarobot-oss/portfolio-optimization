@@ -11,10 +11,10 @@
 experiment: experiments/simulator_comparison/configs/full.yaml  # backtest whose universes, windows, prices, cash rates, and constraints the decisions use
 output: results/simulator_comparison/devices_pilot.parquet    # CPU-against-GPU results (Parquet)
 trials: 1                                                       # backtest trials run, every decision of each
-num_scen: 10000                                                 # scenarios per decision and per timed generator call
+num_scen: 20000                                                 # scenarios per decision and per timed generator call
 gpu_solver: CUOPT                                               # solver of the GPU pipeline, on the GPU of its JointFM service
 cpu_solver: HIGHS                                               # solver of the CPU pipeline; the fastest CPU solver of paired_solvers a pilot measured
 paired_solvers: [CUOPT, CUOPT_BARRIER, CUOPT_DUAL_SIMPLEX, HIGHS, CLARABEL]  # solvers the GPU session runs on every decision's identical problem
-sweep_num_scen: [20000]                                         # scenario counts of the solver sweep, beside num_scen
+sweep_num_scen: [10000]                                         # scenario counts of the solver sweep, beside num_scen
 sweep_decisions: 1                                              # first decisions per trial the sweep solves at every count
 generators: [no_fit-cpu, gaussian-cpu, kde-cpu, kde-gpu]        # simulators timed besides JointFM, each in its own device's session

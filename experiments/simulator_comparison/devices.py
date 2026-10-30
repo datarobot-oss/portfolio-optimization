@@ -108,7 +108,7 @@ from .runner import (
     load_prices,
     package_versions,
 )
-from .solvers import SOLVERS_BY_NAME, check_cuopt_methods, solver_settings
+from .solvers import SOLVERS_BY_NAME, check_cuopt_options, solver_settings
 from .table import RunMetadata, merge_identity, read_results, write_results
 from .trials import RETURNS_SETTINGS, rebalancing_seed
 
@@ -794,7 +794,7 @@ def run_device_session(
     solver = devices.gpu_solver if device == "GPU" else devices.cpu_solver
     paired = devices.paired_solvers if device == "GPU" else ()
     if device == "GPU":
-        check_cuopt_methods(devices.paired_solvers)
+        check_cuopt_options(devices.paired_solvers)
     service_pid, record = session_record(device, service)
 
     identity = devices_identity(devices, experiment, prices, generators)
