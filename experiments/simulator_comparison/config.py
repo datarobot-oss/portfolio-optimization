@@ -481,19 +481,6 @@ class DevicesConfig(BaseModel):
         "and is timed for setup and solve, with its objective and weights kept. "
         "Must list gpu_solver and cpu_solver.",
     )
-    sweep_num_scen: tuple[int, ...] = Field(
-        min_length=1,
-        description="Scenario counts of the solver sweep, strictly increasing and "
-        "without num_scen, whose solves the paired solvers already give. At each "
-        "count the GPU session draws JointFM scenarios on the GPU for the first "
-        "sweep_decisions decisions of every trial and runs every paired solver on "
-        "them.",
-    )
-    sweep_decisions: int = Field(
-        gt=0,
-        description="Decisions per trial, the first ones, that the solver sweep "
-        "runs at every count of sweep_num_scen.",
-    )
     generators: tuple[str, ...] = Field(
         description=f"Simulators besides JointFM, from {', '.join(DEVICE_GENERATOR_NAMES)}, "
         f"timed at every decision on the decision's look-back window: each in the "
@@ -526,16 +513,6 @@ class DevicesConfig(BaseModel):
             raise ValueError("Each generator may run only once.")
         return generators
 
-    @field_validator("sweep_num_scen")
-    @classmethod
-    def increasing_counts(cls, counts: tuple[int, ...]) -> tuple[int, ...]:
-        if counts[0] < 1 or any(b <= a for a, b in zip(counts, counts[1:])):
-            raise ValueError(
-                f"sweep_num_scen {list(counts)} must be positive and strictly "
-                f"increasing."
-            )
-        return counts
-
     @model_validator(mode="after")
     def pipelines_fit_their_devices(self) -> "DevicesConfig":
         gpu, cpu = SOLVERS_BY_NAME[self.gpu_solver], SOLVERS_BY_NAME[self.cpu_solver]
@@ -555,11 +532,6 @@ class DevicesConfig(BaseModel):
             raise ValueError(
                 f"paired_solvers must list the pipelines' solvers {missing}, so "
                 f"the two are compared on identical problems."
-            )
-        if self.num_scen in self.sweep_num_scen:
-            raise ValueError(
-                f"sweep_num_scen {list(self.sweep_num_scen)} must leave out num_scen "
-                f"{self.num_scen}, whose solves the paired solvers already give."
             )
         return self
 

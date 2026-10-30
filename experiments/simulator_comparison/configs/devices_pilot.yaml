@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Pilot of the CPU-against-GPU experiment (task experiments:devices
-# CONFIG=...devices_pilot.yaml): devices.yaml on its first trial and the
-# smallest sweep count, to measure the cost per decision, the CPU service's
-# fastest thread count, and the fastest CPU solver before the full run;
+# CONFIG=...devices_pilot.yaml): devices.yaml on its first trial, to measure
+# the cost per decision, the CPU service's fastest thread count, and the
+# fastest CPU solver before the full run;
 # experiments/simulator_comparison/config.py (DevicesConfig) describes every
 # field. Paths are relative to the repository root.
 
@@ -15,6 +15,4 @@ num_scen: 20000                                                 # scenarios per 
 gpu_solver: CUOPT                                               # solver of the GPU pipeline, on the GPU of its JointFM service
 cpu_solver: HIGHS                                               # solver of the CPU pipeline; the fastest CPU solver of paired_solvers a pilot measured
 paired_solvers: [CUOPT, CUOPT_BARRIER, CUOPT_DUAL_SIMPLEX, HIGHS, CLARABEL]  # solvers the GPU session runs on every decision's identical problem
-sweep_num_scen: [10000]                                         # scenario counts of the solver sweep, beside num_scen
-sweep_decisions: 1                                              # first decisions per trial the sweep solves at every count
 generators: [no_fit-cpu, gaussian-cpu, kde-cpu, kde-gpu]        # simulators timed besides JointFM, each in its own device's session

@@ -29,8 +29,8 @@ of exactly the numbers it draws.
   band of the other simulators; its CSV adds the maximum drawdown and each
   reading's change from the smallest to the largest size
   (``universe_size_table``).
-- ``runtime``, ``runtime_devices``, ``solvers``, and ``solver_sizes``: the
-  CPU-against-GPU experiment's tables (``devices_report``).
+- ``runtime``, ``runtime_devices``, and ``solvers``: the CPU-against-GPU
+  experiment's tables (``devices_report``).
 
 Every statistic comes from ``analysis`` and ``rebalancing_report``, so the
 numbers equal the reports'. The figures name the

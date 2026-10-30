@@ -53,7 +53,6 @@ FIGURES = (
     "runtime",
     "runtime_devices",
     "solvers",
-    "solver_sizes",
 )
 TABLES = FIGURES
 
@@ -382,8 +381,6 @@ def _device_results(config, device_sessions):
         gpu_solver="CUOPT",
         cpu_solver="CLARABEL",
         paired_solvers=("CUOPT", "CLARABEL"),
-        sweep_num_scen=(100,),
-        sweep_decisions=1,
         generators=("no_fit-cpu",),
     )
     return device_sessions(devices, config)

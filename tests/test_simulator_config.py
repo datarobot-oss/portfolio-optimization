@@ -216,8 +216,6 @@ def test_shipped_devices_configs_measure_the_full_backtests_decisions(name):
         ({"cpu_solver": "SCIPY"}, "Unknown solvers"),
         ({"paired_solvers": ["CUOPT", "CLARABEL"]}, "must list the pipelines"),
         ({"paired_solvers": ["CUOPT", "HIGHS", "HIGHS"]}, "only once"),
-        ({"sweep_num_scen": [10000, 20000]}, "leave out num_scen"),
-        ({"sweep_num_scen": [50000, 20000]}, "strictly increasing"),
         ({"generators": ["jointfm"]}, "Unknown generators"),
         ({"generators": ["kde-cpu", "kde-cpu"]}, "only once"),
     ],

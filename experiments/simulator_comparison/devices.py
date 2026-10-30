@@ -26,9 +26,7 @@ After a trial's backtest, each session times its own device's
 ``generators`` on every decision's look-back window. The GPU session then
 runs every ``paired_solvers`` solver on every decision's identical problem,
 rebuilt from the scenarios, expected returns, and previous portfolio the
-backtest optimized on, and the solver sweep: JointFM scenarios at every
-count of ``sweep_num_scen`` for the trial's first ``sweep_decisions``
-decisions, each solved by every paired solver.
+backtest optimized on.
 
 Before its first trial, a session checks its environment
 (``select_session_gpus``, ``session_record``). The JointFM service must be a
@@ -51,7 +49,7 @@ holds:
   ``seconds`` the solve, ``solver_seconds`` the time the solver reports, and
   ``objective``, ``weights``, and ``cash`` its solution.
 
-Rows of the sweep have ``sweep`` set. The first row of each kind and name in
+The first row of each kind and name in
 a process is flagged ``warmup``, because it pays for imports, CUDA start-up,
 or the first connection. A session's trial is written once it is complete,
 so a rerun resumes after the last complete trial of each session.
@@ -59,7 +57,6 @@ Run it as ``python -m experiments.simulator_comparison.devices``.
 """
 
 import argparse
-import dataclasses
 import hashlib
 import os
 import platform
@@ -123,7 +120,6 @@ COLUMNS = (
     "name",
     "device",
     "solver",
-    "sweep",
     "num_scen",
     "seconds",
     "generation_seconds",
@@ -352,7 +348,7 @@ def decision_rows(
     """A decision row and a generation row per pipeline decision."""
     rows = []
     for index, decision in enumerate(decisions):
-        common = {"decision": index, "date": decision.date, "sweep": False}
+        common = {"decision": index, "date": decision.date}
         rows.append(
             {
                 **common,
@@ -394,7 +390,6 @@ def generator_rows(
                     "date": decision.date,
                     "name": arm.name,
                     "device": arm.device,
-                    "sweep": False,
                     "num_scen": returns["cvar_data"].R.shape[1],
                     "seconds": seconds,
                 }
@@ -403,16 +398,11 @@ def generator_rows(
 
 
 def solve_rows(
-    decisions: Sequence[Decision],
-    params,
-    solvers: Sequence[str],
-    *,
-    first: int = 0,
-    sweep: bool,
+    decisions: Sequence[Decision], params, solvers: Sequence[str]
 ) -> list[dict]:
-    """A solve row per decision and solver; decision indices start at ``first``."""
+    """A solve row per decision and solver."""
     rows = []
-    for index, decision in enumerate(decisions, start=first):
+    for index, decision in enumerate(decisions):
         for name in solvers:
             rows.append(
                 {
@@ -422,41 +412,9 @@ def solve_rows(
                     "name": name,
                     "device": SOLVERS_BY_NAME[name].device,
                     "solver": name,
-                    "sweep": sweep,
                     "num_scen": decision.returns["cvar_data"].R.shape[1],
                     **solve_decision(decision, params, name),
                 }
-            )
-    return rows
-
-
-def sweep_rows(
-    arm: Arm,
-    decisions: Sequence[Decision],
-    params,
-    devices: DevicesConfig,
-    seed: int,
-) -> list[dict]:
-    """JointFM's generation and every paired solve at each sweep count, for the first decisions."""
-    rows = []
-    for index, decision in enumerate(decisions[: devices.sweep_decisions]):
-        for count in devices.sweep_num_scen:
-            returns, seconds = time_generation(arm, decision, count, seed)
-            rows.append(
-                {
-                    "kind": "generation",
-                    "decision": index,
-                    "date": decision.date,
-                    "name": arm.name,
-                    "device": arm.device,
-                    "sweep": True,
-                    "num_scen": returns["cvar_data"].R.shape[1],
-                    "seconds": seconds,
-                }
-            )
-            swept = dataclasses.replace(decision, returns=returns)
-            rows += solve_rows(
-                [swept], params, devices.paired_solvers, first=index, sweep=True
             )
     return rows
 
@@ -858,8 +816,7 @@ def run_device_session(
         rows = decision_rows(jointfm, solver, decisions, devices.num_scen)
         rows += generator_rows(own_generators, decisions, devices.num_scen, seed)
         if device == "GPU":
-            rows += solve_rows(decisions, params, paired, sweep=False)
-            rows += sweep_rows(jointfm, decisions, params, devices, seed)
+            rows += solve_rows(decisions, params, paired)
         verify_jointfm_service(jointfm, service)
         foreign = foreign_cores(
             before, cpu_seconds_by_process(excluded), time.perf_counter() - start

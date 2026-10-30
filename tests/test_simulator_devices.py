@@ -49,7 +49,6 @@ STEP_DAYS = 5
 STEPS = 2
 TRIALS = 2
 PAIRED = ("CUOPT", "HIGHS", "CLARABEL")
-SWEEP = (100,)
 
 
 def _write_inputs(directory):
@@ -122,8 +121,6 @@ def _configs(directory, **devices):
         gpu_solver="CUOPT",
         cpu_solver="HIGHS",
         paired_solvers=PAIRED,
-        sweep_num_scen=SWEEP,
-        sweep_decisions=1,
         generators=("no_fit-cpu", "gaussian-cpu"),
     )
     values.update(devices)
@@ -155,7 +152,7 @@ def test_every_decision_of_both_sessions_is_timed_by_stage(sessions):
 
 def test_each_session_times_its_own_devices_simulators(sessions):
     _, _, frame, _ = sessions
-    calls = frame[(frame["kind"] == "generation") & ~frame["sweep"]]
+    calls = frame[frame["kind"] == "generation"]
     names = calls.groupby("session")["name"].unique().map(sorted).to_dict()
     assert names == {
         "CPU": ["gaussian-cpu", "jointfm-cpu", "no_fit-cpu"],
@@ -169,18 +166,12 @@ def test_each_session_times_its_own_devices_simulators(sessions):
     )
 
 
-def test_only_the_gpu_session_solves_the_paired_problems_and_the_sweep(sessions):
-    _, _, frame, _ = sessions
+def test_only_the_gpu_session_solves_the_paired_problems(sessions):
+    device_config, _, frame, _ = sessions
     solves = frame[frame["kind"] == "solve"]
     assert set(solves["session"]) == {"GPU"}
-    paired = solves[~solves["sweep"]]
-    assert len(paired) == TRIALS * STEPS * len(PAIRED)
-    swept = solves[solves["sweep"]]
-    assert set(swept["decision"]) == {0}
-    assert set(swept["num_scen"]) == set(SWEEP)
-    assert len(swept) == TRIALS * len(SWEEP) * len(PAIRED)
-    sweep_calls = frame[(frame["kind"] == "generation") & frame["sweep"]]
-    assert list(sweep_calls["name"].unique()) == ["jointfm-gpu"]
+    assert len(solves) == TRIALS * STEPS * len(PAIRED)
+    assert set(solves["num_scen"]) == {device_config.num_scen}
 
 
 def test_the_first_row_of_each_kind_and_name_per_session_is_warmup(sessions):
@@ -194,7 +185,7 @@ def test_the_first_row_of_each_kind_and_name_per_session_is_warmup(sessions):
 def test_the_paired_solvers_agree_on_identical_problems(sessions):
     """The GPU pipeline's stand-in is Clarabel, so it matches Clarabel exactly."""
     _, _, frame, _ = sessions
-    solves = frame[(frame["kind"] == "solve") & ~frame["sweep"]]
+    solves = frame[frame["kind"] == "solve"]
     by_solver = {
         name: np.stack(rows.sort_values(["trial", "decision"])["weights"].to_numpy())
         for name, rows in solves.groupby("name")
@@ -304,7 +295,7 @@ def test_runtime_reads_every_simulator_on_its_device(sessions):
         "jointfm-cpu",
         "jointfm-gpu",
     ]
-    calls = frame[(frame["kind"] == "generation") & ~frame["sweep"] & ~frame["warmup"]]
+    calls = frame[(frame["kind"] == "generation") & ~frame["warmup"]]
     per_trial = calls.groupby(["name", "trial"])["seconds"].mean()
     np.testing.assert_allclose(
         table.set_index("arm")["estimate"],
@@ -338,9 +329,6 @@ def test_solvers_compare_with_the_gpu_pipelines_solver(sessions):
     assert solvers.loc["CUOPT", "max_weight_difference"] == 0.0
     assert solvers.loc["HIGHS", "max_objective_gap"] < 1e-6
     assert set(solvers["decisions"]) == {TRIALS * STEPS}
-    sizes = tables["solver_sizes"]
-    assert set(sizes["num_scen"]) == {device_config.num_scen, *SWEEP}
-    assert set(sizes["solver"]) == set(PAIRED)
 
 
 def test_a_single_session_is_refused(sessions, tmp_path):

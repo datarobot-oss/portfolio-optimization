@@ -3,7 +3,7 @@
 
 """Tables and figures of the CPU-against-GPU experiment (``devices.py``).
 
-``device_tables`` reads a results file into four tables, each holding exactly
+``device_tables`` reads a results file into three tables, each holding exactly
 the numbers its figure draws:
 
 - ``runtime``: each simulator's mean seconds per scenario-generation call on
@@ -13,8 +13,6 @@ the numbers its figure draws:
 - ``solvers``: each paired solver's mean seconds per solve of the decisions'
   identical problems, its time over the GPU pipeline's solver, and how far its
   solutions lie from that solver's.
-- ``solver_sizes``: each paired solver's mean seconds per solve over the
-  scenario counts of the sweep.
 
 A mean is the mean over trials of each trial's mean, with its 95 % bootstrap
 interval over trials (``analysis.bootstrap_interval``); a ratio is the median
@@ -32,19 +30,15 @@ Titles state what is drawn, never a finding.
 import argparse
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from matplotlib.lines import Line2D
 
 from .analysis import BOOTSTRAP_SEED, bootstrap_interval
 from .arms import ARMS_BY_NAME
 from .blog_style import (
     BLOG_NAMES,
-    TEXT_SIZE,
-    _axis_labels,
     _footnote,
     _headline,
     _panel_title,
@@ -56,13 +50,8 @@ from .devices import DEVICES
 from .plotting import (
     DEVICE_ORDER,
     INK,
-    INK_SECONDARY,
-    LINE_WIDTH,
-    MARKER_EDGE,
     SIMULATOR_COLORS,
     SIMULATOR_ORDER,
-    SURFACE,
-    _curves,
     _figure,
     _save,
 )
@@ -93,27 +82,7 @@ SOLVER_COLORS = {
     "HIGHS": "#eb6834",
     "CLARABEL": "#1baf7a",
 }
-TABLES = ("runtime", "runtime_devices", "solvers", "solver_sizes")
-
-
-@dataclass(frozen=True)
-class SolverStyle:
-    """How one solver is drawn: its own color, solid on the GPU and dashed on the CPU."""
-
-    name: str
-
-    @property
-    def color(self) -> str:
-        return SOLVER_COLORS[self.name]
-
-    @property
-    def filled(self) -> bool:
-        return SOLVERS_BY_NAME[self.name].device == "GPU"
-
-    @property
-    def inline_label(self) -> str:
-        solver = SOLVERS_BY_NAME[self.name]
-        return f"{solver.label} on {solver.device}"
+TABLES = ("runtime", "runtime_devices", "solvers")
 
 
 def read_device_results(path: Path) -> tuple[pd.DataFrame, dict]:
@@ -210,7 +179,6 @@ def runtime_table(frame: pd.DataFrame, identity: dict) -> pd.DataFrame:
     count, except for Historical, which replays the look-back window's days.
     """
     calls = _timed(frame, "generation")
-    calls = calls[~calls["sweep"].astype(bool)]
     per_trial = calls.groupby(["name", "trial"])["seconds"].mean()
 
     def order(name: str) -> tuple[int, int]:
@@ -283,7 +251,7 @@ def solver_table(frame: pd.DataFrame, identity: dict) -> pd.DataFrame:
     solver's solution of the same problem, and ``max_objective_gap`` the
     largest absolute difference of the objective, both over every decision.
     """
-    solves = frame[(frame["kind"] == "solve") & ~frame["sweep"].astype(bool)]
+    solves = frame[frame["kind"] == "solve"]
     timed = solves[~solves["warmup"].astype(bool)]
     per_trial = timed.groupby(["name", "trial"])[["seconds", "setup_seconds"]].mean()
     reference_name = identity["devices"]["gpu_solver"]
@@ -329,31 +297,6 @@ def solver_table(frame: pd.DataFrame, identity: dict) -> pd.DataFrame:
     )
 
 
-def solver_size_table(frame: pd.DataFrame, identity: dict) -> pd.DataFrame:
-    """Each paired solver's mean seconds per solve at every scenario count of the sweep.
-
-    The sweep's decisions are each trial's first ``sweep_decisions``; at the
-    configured ``num_scen`` their paired solves stand in for a sweep count.
-    """
-    solves = _timed(frame, "solve")
-    solves = solves[solves["decision"] < identity["devices"]["sweep_decisions"]]
-    per_trial = solves.groupby(["name", "num_scen", "trial"])["seconds"].mean()
-    rows = [
-        {
-            "solver": name,
-            "label": SOLVERS_BY_NAME[name].label,
-            "device": SOLVERS_BY_NAME[name].device,
-            "num_scen": int(count),
-            **_mean(per_trial.loc[name, count]),
-        }
-        for name in identity["devices"]["paired_solvers"]
-        for count in sorted(per_trial.loc[name].index.get_level_values(0).unique())
-    ]
-    return pd.DataFrame(rows).assign(
-        assets=identity["experiment"]["assets"], **hardware(identity)
-    )
-
-
 def device_tables(results: Path) -> dict[str, pd.DataFrame]:
     """Every table of the module docstring, by name, from a results file.
 
@@ -367,7 +310,6 @@ def device_tables(results: Path) -> dict[str, pd.DataFrame]:
         "runtime": runtime_table(frame, identity),
         "runtime_devices": stage_table(frame, identity),
         "solvers": solver_table(frame, identity),
-        "solver_sizes": solver_size_table(frame, identity),
     }
 
 
@@ -496,54 +438,6 @@ def plot_solvers(table: pd.DataFrame, directory: Path) -> list[Path]:
     return _save(figure, directory, "solvers")
 
 
-def plot_solver_sizes(table: pd.DataFrame, directory: Path) -> list[Path]:
-    """Each paired solver's mean seconds per solve over the scenario counts (``solver_size_table``)."""
-    figure, axes = _figure(8, 5.4)
-    ax = axes[0, 0]
-    styles = [SolverStyle(name) for name in table["solver"].unique()]
-    _curves(ax, table.rename(columns={"solver": "arm"}), "num_scen", styles)
-    ax.set_yscale("log")
-    ax.set_xticks(ax.get_xticks(), [f"{int(tick):,}" for tick in ax.get_xticks()])
-    _axis_labels(ax, "scenarios per problem (log)", "seconds per solve (log)")
-    _panel_title(
-        ax,
-        "Seconds per solve over the number of scenarios",
-        f"mean over {int(table['trials'].min())} or more trials with its 95 % "
-        "interval; solves without warm-up, setup excluded",
-    )
-    figure.legend(
-        handles=[
-            Line2D(
-                [],
-                [],
-                color=style.color,
-                linewidth=LINE_WIDTH,
-                linestyle="-" if style.filled else "--",
-                marker="o",
-                markerfacecolor=style.color if style.filled else SURFACE,
-                markeredgecolor=style.color,
-                markeredgewidth=MARKER_EDGE,
-                label=style.inline_label,
-            )
-            for style in styles
-        ],
-        loc="outside lower center",
-        ncols=min(len(styles), 3),
-        frameon=False,
-        fontsize=TEXT_SIZE,
-        labelcolor=INK_SECONDARY,
-    )
-    _footnote(
-        figure,
-        f"Problems of {int(table['assets'].iloc[0])} assets from each trial's first "
-        f"rebalancing decisions, with JointFM scenarios drawn on the GPU.\n"
-        f"{_hardware_text(table)}",
-    )
-    _headline(figure, "Solve time over the number of scenarios")
-    _style_text(figure)
-    return _save(figure, directory, "solver_sizes")
-
-
 def write_device_figures(
     tables: dict[str, pd.DataFrame], directory: Path
 ) -> list[Path]:
@@ -557,7 +451,6 @@ def write_device_figures(
     files += plot_runtime(tables["runtime"], directory)
     files += plot_stages(tables["runtime_devices"], directory)
     files += plot_solvers(tables["solvers"], directory)
-    files += plot_solver_sizes(tables["solver_sizes"], directory)
     return files
 
 
