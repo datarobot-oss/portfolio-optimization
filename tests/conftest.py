@@ -120,6 +120,53 @@ def module_fake_jointfm():
         yield _install_fake_jointfm(patch)
 
 
+@pytest.fixture(scope="module")
+def device_sessions(module_fake_jointfm):
+    """Run both sessions of a CPU-against-GPU experiment on a host without a GPU.
+
+    The GPU pipeline's cuOpt solves with Clarabel instead, and each session's
+    environment check (``devices.session_record``) returns a fixed record with
+    a stand-in GPU, so the sessions differ only in the device the fake JointFM
+    service reports. The returned function takes the experiment's
+    ``DevicesConfig`` and ``ExperimentConfig`` and returns its results file.
+    """
+    # Imported here: the library's tests run without the experiments extra.
+    import dataclasses
+    import os
+
+    from experiments.simulator_comparison import devices, solvers
+
+    module_fake_jointfm.envelope.n_input = 1000
+    module_fake_jointfm.sample_scale = 0.01
+
+    def record(device, service):
+        session = {"jointfm": service}
+        if device == "GPU":
+            session["gpu"] = {"name": "Test GPU", "driver": "0", "uuid": "GPU-test"}
+        return os.getpid(), session
+
+    def run(device_config, experiment):
+        for device, service_device in (("GPU", "cuda"), ("CPU", "cpu")):
+            module_fake_jointfm.device = service_device
+            devices.run_device_session(device_config, experiment, device)
+        module_fake_jointfm.device = "cpu"
+        return device_config.output
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setitem(
+            solvers.SOLVERS_BY_NAME,
+            "CUOPT",
+            dataclasses.replace(
+                solvers.SOLVERS_BY_NAME["CUOPT"],
+                backend="CLARABEL",
+                options=(),
+                module="clarabel",
+            ),
+        )
+        patch.setattr(devices, "session_record", record)
+        yield run
+
+
 @pytest.fixture()
 def window_scenario_results():
     """Run a config's scenario comparison with the window's arm alone.

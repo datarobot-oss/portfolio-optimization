@@ -178,51 +178,10 @@ wheels = [
 
 [[package]]
 name = "cffi"
-version = "2.0.0"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version < '3.11.5' and sys_platform == 'linux'",
-]
-dependencies = [
-    { name = "pycparser", marker = "(python_full_version < '3.11.5' and implementation_name != 'PyPy' and extra == 'extra-22-portfolio-optimization-cuda13') or (python_full_version >= '3.11.5' and extra == 'extra-22-portfolio-optimization-cuda13' and extra == 'extra-22-portfolio-optimization-cuda13-socp') or (implementation_name == 'PyPy' and extra == 'extra-22-portfolio-optimization-cuda13' and extra == 'extra-22-portfolio-optimization-cuda13-socp') or (extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13') or (extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13-socp')" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/eb/56/b1ba7935a17738ae8453301356628e8147c79dbb825bcbc73dc7401f9846/cffi-2.0.0.tar.gz", hash = "sha256:44d1b5909021139fe36001ae048dbdde8214afa20200eda0f64c068cac5d5529", size = 523588, upload-time = "2025-09-08T23:24:04.541Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/b1/b7/1200d354378ef52ec227395d95c2576330fd22a869f7a70e88e1447eb234/cffi-2.0.0-cp311-cp311-manylinux1_i686.manylinux2014_i686.manylinux_2_17_i686.manylinux_2_5_i686.whl", hash = "sha256:baf5215e0ab74c16e2dd324e8ec067ef59e41125d3eade2b863d294fd5035c92", size = 209613, upload-time = "2025-09-08T23:22:29.475Z" },
-    { url = "https://files.pythonhosted.org/packages/b8/56/6033f5e86e8cc9bb629f0077ba71679508bdf54a9a5e112a3c0b91870332/cffi-2.0.0-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:730cacb21e1bdff3ce90babf007d0a0917cc3e6492f336c2f0134101e0944f93", size = 216476, upload-time = "2025-09-08T23:22:31.063Z" },
-    { url = "https://files.pythonhosted.org/packages/dc/7f/55fecd70f7ece178db2f26128ec41430d8720f2d12ca97bf8f0a628207d5/cffi-2.0.0-cp311-cp311-manylinux2014_ppc64le.manylinux_2_17_ppc64le.whl", hash = "sha256:6824f87845e3396029f3820c206e459ccc91760e8fa24422f8b0c3d1731cbec5", size = 203374, upload-time = "2025-09-08T23:22:32.507Z" },
-    { url = "https://files.pythonhosted.org/packages/84/ef/a7b77c8bdc0f77adc3b46888f1ad54be8f3b7821697a7b89126e829e676a/cffi-2.0.0-cp311-cp311-manylinux2014_s390x.manylinux_2_17_s390x.whl", hash = "sha256:9de40a7b0323d889cf8d23d1ef214f565ab154443c42737dfe52ff82cf857664", size = 202597, upload-time = "2025-09-08T23:22:34.132Z" },
-    { url = "https://files.pythonhosted.org/packages/d7/91/500d892b2bf36529a75b77958edfcd5ad8e2ce4064ce2ecfeab2125d72d1/cffi-2.0.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:8941aaadaf67246224cee8c3803777eed332a19d909b47e29c9842ef1e79ac26", size = 215574, upload-time = "2025-09-08T23:22:35.443Z" },
-    { url = "https://files.pythonhosted.org/packages/44/64/58f6255b62b101093d5df22dcb752596066c7e89dd725e0afaed242a61be/cffi-2.0.0-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:a05d0c237b3349096d3981b727493e22147f934b20f6f125a3eba8f994bec4a9", size = 218971, upload-time = "2025-09-08T23:22:36.805Z" },
-    { url = "https://files.pythonhosted.org/packages/ab/49/fa72cebe2fd8a55fbe14956f9970fe8eb1ac59e5df042f603ef7c8ba0adc/cffi-2.0.0-cp311-cp311-musllinux_1_2_i686.whl", hash = "sha256:94698a9c5f91f9d138526b48fe26a199609544591f859c870d477351dc7b2414", size = 211972, upload-time = "2025-09-08T23:22:38.436Z" },
-    { url = "https://files.pythonhosted.org/packages/0b/28/dd0967a76aab36731b6ebfe64dec4e981aff7e0608f60c2d46b46982607d/cffi-2.0.0-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:5fed36fccc0612a53f1d4d9a816b50a36702c28a2aa880cb8a122b3466638743", size = 217078, upload-time = "2025-09-08T23:22:39.776Z" },
-    { url = "https://files.pythonhosted.org/packages/ff/df/a4f0fbd47331ceeba3d37c2e51e9dfc9722498becbeec2bd8bc856c9538a/cffi-2.0.0-cp312-cp312-manylinux1_i686.manylinux2014_i686.manylinux_2_17_i686.manylinux_2_5_i686.whl", hash = "sha256:21d1152871b019407d8ac3985f6775c079416c282e431a4da6afe7aefd2bccbe", size = 212529, upload-time = "2025-09-08T23:22:47.349Z" },
-    { url = "https://files.pythonhosted.org/packages/d5/72/12b5f8d3865bf0f87cf1404d8c374e7487dcf097a1c91c436e72e6badd83/cffi-2.0.0-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:b21e08af67b8a103c71a250401c78d5e0893beff75e28c53c98f4de42f774062", size = 220097, upload-time = "2025-09-08T23:22:48.677Z" },
-    { url = "https://files.pythonhosted.org/packages/c2/95/7a135d52a50dfa7c882ab0ac17e8dc11cec9d55d2c18dda414c051c5e69e/cffi-2.0.0-cp312-cp312-manylinux2014_ppc64le.manylinux_2_17_ppc64le.whl", hash = "sha256:1e3a615586f05fc4065a8b22b8152f0c1b00cdbc60596d187c2a74f9e3036e4e", size = 207983, upload-time = "2025-09-08T23:22:50.06Z" },
-    { url = "https://files.pythonhosted.org/packages/3a/c8/15cb9ada8895957ea171c62dc78ff3e99159ee7adb13c0123c001a2546c1/cffi-2.0.0-cp312-cp312-manylinux2014_s390x.manylinux_2_17_s390x.whl", hash = "sha256:81afed14892743bbe14dacb9e36d9e0e504cd204e0b165062c488942b9718037", size = 206519, upload-time = "2025-09-08T23:22:51.364Z" },
-    { url = "https://files.pythonhosted.org/packages/78/2d/7fa73dfa841b5ac06c7b8855cfc18622132e365f5b81d02230333ff26e9e/cffi-2.0.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:3e17ed538242334bf70832644a32a7aae3d83b57567f9fd60a26257e992b79ba", size = 219572, upload-time = "2025-09-08T23:22:52.902Z" },
-    { url = "https://files.pythonhosted.org/packages/07/e0/267e57e387b4ca276b90f0434ff88b2c2241ad72b16d31836adddfd6031b/cffi-2.0.0-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:3925dd22fa2b7699ed2617149842d2e6adde22b262fcbfada50e3d195e4b3a94", size = 222963, upload-time = "2025-09-08T23:22:54.518Z" },
-    { url = "https://files.pythonhosted.org/packages/b6/75/1f2747525e06f53efbd878f4d03bac5b859cbc11c633d0fb81432d98a795/cffi-2.0.0-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:2c8f814d84194c9ea681642fd164267891702542f028a15fc97d4674b6206187", size = 221361, upload-time = "2025-09-08T23:22:55.867Z" },
-    { url = "https://files.pythonhosted.org/packages/b0/1e/d22cc63332bd59b06481ceaac49d6c507598642e2230f201649058a7e704/cffi-2.0.0-cp313-cp313-manylinux1_i686.manylinux2014_i686.manylinux_2_17_i686.manylinux_2_5_i686.whl", hash = "sha256:07b271772c100085dd28b74fa0cd81c8fb1a3ba18b21e03d7c27f3436a10606b", size = 212446, upload-time = "2025-09-08T23:23:03.472Z" },
-    { url = "https://files.pythonhosted.org/packages/a9/f5/a2c23eb03b61a0b8747f211eb716446c826ad66818ddc7810cc2cc19b3f2/cffi-2.0.0-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:d48a880098c96020b02d5a1f7d9251308510ce8858940e6fa99ece33f610838b", size = 220101, upload-time = "2025-09-08T23:23:04.792Z" },
-    { url = "https://files.pythonhosted.org/packages/f2/7f/e6647792fc5850d634695bc0e6ab4111ae88e89981d35ac269956605feba/cffi-2.0.0-cp313-cp313-manylinux2014_ppc64le.manylinux_2_17_ppc64le.whl", hash = "sha256:f93fd8e5c8c0a4aa1f424d6173f14a892044054871c771f8566e4008eaa359d2", size = 207948, upload-time = "2025-09-08T23:23:06.127Z" },
-    { url = "https://files.pythonhosted.org/packages/cb/1e/a5a1bd6f1fb30f22573f76533de12a00bf274abcdc55c8edab639078abb6/cffi-2.0.0-cp313-cp313-manylinux2014_s390x.manylinux_2_17_s390x.whl", hash = "sha256:dd4f05f54a52fb558f1ba9f528228066954fee3ebe629fc1660d874d040ae5a3", size = 206422, upload-time = "2025-09-08T23:23:07.753Z" },
-    { url = "https://files.pythonhosted.org/packages/98/df/0a1755e750013a2081e863e7cd37e0cdd02664372c754e5560099eb7aa44/cffi-2.0.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:c8d3b5532fc71b7a77c09192b4a5a200ea992702734a2e9279a37f2478236f26", size = 219499, upload-time = "2025-09-08T23:23:09.648Z" },
-    { url = "https://files.pythonhosted.org/packages/50/e1/a969e687fcf9ea58e6e2a928ad5e2dd88cc12f6f0ab477e9971f2309b57c/cffi-2.0.0-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:d9b29c1f0ae438d5ee9acb31cadee00a58c46cc9c0b2f9038c6b0b3470877a8c", size = 222928, upload-time = "2025-09-08T23:23:10.928Z" },
-    { url = "https://files.pythonhosted.org/packages/36/54/0362578dd2c9e557a28ac77698ed67323ed5b9775ca9d3fe73fe191bb5d8/cffi-2.0.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:6d50360be4546678fc1b79ffe7a66265e28667840010348dd69a314145807a1b", size = 221302, upload-time = "2025-09-08T23:23:12.42Z" },
-]
-
-[[package]]
-name = "cffi"
 version = "2.1.1"
 source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.12' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'linux'",
-    "python_full_version < '3.11.5' and sys_platform == 'linux'",
-]
 dependencies = [
-    { name = "pycparser", marker = "(python_full_version >= '3.11.5' and implementation_name != 'PyPy') or (python_full_version < '3.11.5' and extra != 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13' and extra == 'extra-22-portfolio-optimization-cuda13-socp') or (implementation_name != 'PyPy' and extra == 'extra-22-portfolio-optimization-cuda12') or (implementation_name != 'PyPy' and extra != 'extra-22-portfolio-optimization-cuda13') or (implementation_name == 'PyPy' and extra == 'extra-22-portfolio-optimization-cuda13' and extra == 'extra-22-portfolio-optimization-cuda13-socp') or (extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13') or (extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13-socp')" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy' or (extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13') or (extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13-socp') or (extra == 'extra-22-portfolio-optimization-cuda13' and extra == 'extra-22-portfolio-optimization-cuda13-socp')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/9e/ef/008a1939e372c06329a3fce4279c02f328488f3526744906eeec3da7ad5f/cffi-2.1.1.tar.gz", hash = "sha256:dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be", size = 530807, upload-time = "2026-08-03T21:21:18.939Z" }
 wheels = [
@@ -311,8 +270,7 @@ name = "clarabel"
 version = "0.11.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi", version = "2.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11.5' and extra == 'extra-22-portfolio-optimization-cuda13') or (extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13') or (extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13-socp') or (extra == 'extra-22-portfolio-optimization-cuda13' and extra == 'extra-22-portfolio-optimization-cuda13-socp')" },
-    { name = "cffi", version = "2.1.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11.5' or extra == 'extra-22-portfolio-optimization-cuda12' or extra != 'extra-22-portfolio-optimization-cuda13' or (extra == 'extra-22-portfolio-optimization-cuda13' and extra == 'extra-22-portfolio-optimization-cuda13-socp')" },
+    { name = "cffi" },
     { name = "numpy" },
     { name = "scipy" },
 ]
@@ -870,38 +828,11 @@ wheels = [
 
 [[package]]
 name = "curl-cffi"
-version = "0.16.3"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version < '3.11.5' and sys_platform == 'linux'",
-]
-dependencies = [
-    { name = "certifi", marker = "(python_full_version < '3.11.5' and extra == 'extra-22-portfolio-optimization-cuda13') or (extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13') or (extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13-socp') or (extra == 'extra-22-portfolio-optimization-cuda13' and extra == 'extra-22-portfolio-optimization-cuda13-socp')" },
-    { name = "cffi", version = "2.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11.5' and extra == 'extra-22-portfolio-optimization-cuda13') or (extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13') or (extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13-socp') or (extra == 'extra-22-portfolio-optimization-cuda13' and extra == 'extra-22-portfolio-optimization-cuda13-socp')" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/82/e1/730125c43e3e331d98e17af3cb310ba526b3f1101b7635ca23d976ebfcf5/curl_cffi-0.16.3.tar.gz", hash = "sha256:d15d0c2a35f2d75bec430c28946c2a833f421c85773bdb0795182cc5c515665b", size = 239020, upload-time = "2026-09-02T11:58:23.266Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/97/2d/25b106e64178829be1ce171b6cd45ba354ab7a2a5169001866b38d4c440f/curl_cffi-0.16.3-cp310-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:d5a4103f2baa1fcf619ec3101b419827d367044ba106b206228137cc71a5a9c5", size = 12834219, upload-time = "2026-09-02T11:57:42.711Z" },
-    { url = "https://files.pythonhosted.org/packages/e7/dd/db27a521777d0cf00f9a1554453ae730539dd134bca108d8df256a85c91e/curl_cffi-0.16.3-cp310-abi3-manylinux2014_i686.manylinux_2_17_i686.whl", hash = "sha256:f2795f0ef2e8cc0e6d702e52367af6600f5bcf10e44d683e256254adc7e3589f", size = 12655304, upload-time = "2026-09-02T11:57:45.334Z" },
-    { url = "https://files.pythonhosted.org/packages/72/01/2bbf141baa0fc3921d31a90de5465b7a94188845a8fe84dee86bf7bd90f1/curl_cffi-0.16.3-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:a875a661e2f9a949be29454880bbb9553307a487c4c08819738298cf5c1622e2", size = 13484311, upload-time = "2026-09-02T11:57:47.58Z" },
-    { url = "https://files.pythonhosted.org/packages/bb/d4/745ca299a2a223ee18574ec7cff75de620a92ce69b3cb09490db8fba614b/curl_cffi-0.16.3-cp310-abi3-manylinux_2_28_armv7l.manylinux_2_31_armv7l.whl", hash = "sha256:0851e710608122a2716bdee35788bbd7e9d4a0fd42899b2bca9181277095af8e", size = 12840616, upload-time = "2026-09-02T11:57:50.016Z" },
-    { url = "https://files.pythonhosted.org/packages/5e/bf/98d72d7a081cc155a71ab66bde6a18640d4ac5d4f6766f729a92cb4257c0/curl_cffi-0.16.3-cp310-abi3-manylinux_2_34_riscv64.manylinux_2_39_riscv64.whl", hash = "sha256:1d7e553442cefec100dfd1fca4ae7035ab6c094457244bf60a38670b8ac8185d", size = 12612602, upload-time = "2026-09-02T11:57:52.584Z" },
-    { url = "https://files.pythonhosted.org/packages/36/cf/2fdaff71fd6f39c5994495af8378e6e26bca8e447d94d2f75a76337908c8/curl_cffi-0.16.3-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:60621b3f561346046dd62be33abfb50c8b88a8007699d6b11d39ad4755312c4a", size = 12588697, upload-time = "2026-09-02T11:57:55.138Z" },
-    { url = "https://files.pythonhosted.org/packages/74/55/68c399019bc24ea6ac783c98139a2555f88589631f3d127fe6b9073f019b/curl_cffi-0.16.3-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:20a7b1b473371cfaf2118958034977e457c6fa279fbd11543c9e0ab58be9eedd", size = 13253555, upload-time = "2026-09-02T11:57:57.524Z" },
-]
-
-[[package]]
-name = "curl-cffi"
 version = "0.17.0"
 source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.12' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'linux'",
-    "python_full_version < '3.11.5' and sys_platform == 'linux'",
-]
 dependencies = [
-    { name = "certifi", marker = "python_full_version >= '3.11.5' or extra == 'extra-22-portfolio-optimization-cuda12' or extra != 'extra-22-portfolio-optimization-cuda13' or (extra == 'extra-22-portfolio-optimization-cuda13' and extra == 'extra-22-portfolio-optimization-cuda13-socp')" },
-    { name = "cffi", version = "2.1.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11.5' or extra == 'extra-22-portfolio-optimization-cuda12' or extra != 'extra-22-portfolio-optimization-cuda13' or (extra == 'extra-22-portfolio-optimization-cuda13' and extra == 'extra-22-portfolio-optimization-cuda13-socp')" },
+    { name = "certifi" },
+    { name = "cffi" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/96/4c/69074f9797d83a5401b3c6bc58c5de5aad6d1a085d0497b87a093a152e87/curl_cffi-0.17.0.tar.gz", hash = "sha256:31ee8500d06d6502ce1ec0b7ded1c5aa8e8f3401bbe37ccd78d6153d859d8f3c", size = 282294, upload-time = "2026-10-26T04:13:39.396Z" }
 wheels = [
@@ -2598,6 +2529,7 @@ cuda13-socp = [
     { name = "cuopt-cu13", version = "26.6.0", source = { registry = "https://pypi.nvidia.com/" } },
 ]
 experiments = [
+    { name = "psutil" },
     { name = "pyarrow", version = "23.0.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-22-portfolio-optimization-cuda12' or extra != 'extra-22-portfolio-optimization-cuda13' or (extra == 'extra-22-portfolio-optimization-cuda13' and extra == 'extra-22-portfolio-optimization-cuda13-socp')" },
     { name = "pyarrow", version = "26.0.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-22-portfolio-optimization-cuda13' or (extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13-socp')" },
     { name = "pyyaml" },
@@ -2633,6 +2565,7 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.8" },
     { name = "numpy", specifier = ">=2.0.0" },
     { name = "pandas", specifier = ">=2.0" },
+    { name = "psutil", marker = "extra == 'experiments'", specifier = ">=7.1" },
     { name = "pyarrow", marker = "extra == 'experiments'", specifier = ">=21" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
@@ -3121,8 +3054,7 @@ name = "pyzmq"
 version = "27.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi", version = "2.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11.5' and implementation_name == 'pypy' and extra == 'extra-22-portfolio-optimization-cuda13') or (python_full_version >= '3.11.5' and extra == 'extra-22-portfolio-optimization-cuda13' and extra == 'extra-22-portfolio-optimization-cuda13-socp') or (implementation_name != 'pypy' and extra == 'extra-22-portfolio-optimization-cuda13' and extra == 'extra-22-portfolio-optimization-cuda13-socp') or (extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13') or (extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13-socp')" },
-    { name = "cffi", version = "2.1.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.11.5' and implementation_name == 'pypy') or (python_full_version < '3.11.5' and extra != 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13' and extra == 'extra-22-portfolio-optimization-cuda13-socp') or (implementation_name == 'pypy' and extra == 'extra-22-portfolio-optimization-cuda12') or (implementation_name == 'pypy' and extra != 'extra-22-portfolio-optimization-cuda13') or (implementation_name != 'pypy' and extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13') or (implementation_name != 'pypy' and extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13-socp') or (implementation_name != 'pypy' and extra == 'extra-22-portfolio-optimization-cuda13' and extra == 'extra-22-portfolio-optimization-cuda13-socp')" },
+    { name = "cffi", marker = "implementation_name == 'pypy' or (extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13') or (extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13-socp') or (extra == 'extra-22-portfolio-optimization-cuda13' and extra == 'extra-22-portfolio-optimization-cuda13-socp')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/04/0b/3c9baedbdf613ecaa7aa07027780b8867f57b6293b6ee50de316c9f3222b/pyzmq-27.1.0.tar.gz", hash = "sha256:ac0765e3d44455adb6ddbf4417dcce460fc40a05978c08efdf2948072f6db540", size = 281750, upload-time = "2025-09-08T23:10:18.157Z" }
 wheels = [
@@ -3735,8 +3667,7 @@ version = "0.2.66"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "beautifulsoup4" },
-    { name = "curl-cffi", version = "0.16.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11.5' and extra == 'extra-22-portfolio-optimization-cuda13') or (extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13') or (extra == 'extra-22-portfolio-optimization-cuda12' and extra == 'extra-22-portfolio-optimization-cuda13-socp') or (extra == 'extra-22-portfolio-optimization-cuda13' and extra == 'extra-22-portfolio-optimization-cuda13-socp')" },
-    { name = "curl-cffi", version = "0.17.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11.5' or extra == 'extra-22-portfolio-optimization-cuda12' or extra != 'extra-22-portfolio-optimization-cuda13' or (extra == 'extra-22-portfolio-optimization-cuda13' and extra == 'extra-22-portfolio-optimization-cuda13-socp')" },
+    { name = "curl-cffi" },
     { name = "frozendict" },
     { name = "multitasking" },
     { name = "numpy" },

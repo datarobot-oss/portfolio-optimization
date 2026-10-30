@@ -71,6 +71,7 @@ from .runner import (
     package_versions,
     run_identity,
 )
+from .solvers import SOLVERS_BY_NAME, solver_settings
 from .swaps import SwapScenarioGenerator
 from .table import RunMetadata, merge_identity, read_results, write_results
 from .trials import (
@@ -101,15 +102,6 @@ METRICS = (
     "buy_and_hold_return",
     *CHOSEN_METRICS,
 )
-
-
-def solver_settings(solver: str) -> dict:
-    """CVXPY solver settings of every optimization."""
-    import cvxpy as cp
-
-    if solver == "CUOPT":
-        return {"solver": cp.CUOPT, "verbose": False, "solver_method": "PDLP"}
-    return {"solver": cp.CLARABEL, "verbose": False}
 
 
 def write_universe(prices: pd.DataFrame, trial: Trial, directory: Path) -> Path:
@@ -253,27 +245,40 @@ def backtest_scenarios(
     ), cvar_utils.generate_cvar_data
 
 
-def run_backtest(
-    arm: AnyArm,
-    trial: Trial,
-    window: TradingWindow,
+def backtest_api_settings() -> ApiSettings:
+    """Optimizer API settings of every backtest optimization: the trial's risk
+    aversion as calibrated once (``calibrated_cvar_params``), never rescaled."""
+    return ApiSettings(scale_risk_aversion=False)
+
+
+def run_rebalancer(
+    dates: pd.DatetimeIndex,
     universe_path: Path,
+    window: TradingWindow,
     params: CvarParameters,
-    config: ExperimentConfig,
+    rebalancing: RebalancingConfig,
     risk_free_rates: pd.Series,
-) -> dict:
-    """One rebalancing run of ``arm`` on a trial's universe and window."""
+    *,
+    settings: ScenarioGenerationSettings,
+    generator: Callable[..., dict],
+    observer: Callable[..., None],
+    solver: str,
+) -> tuple:
+    """Rebalance a trial's universe over its window with ``rebalancing``'s rules.
+
+    ``dates`` index the universe's prices at ``universe_path``. ``settings``
+    and ``generator`` make each optimization's scenarios, ``observer`` sees
+    every decision (``rebalance_portfolio``'s ``decision_observer``), and
+    ``solver`` names the solver of every optimization (``solvers.py``).
+
+    Returns
+    -------
+    tuple
+        The ``rebalance_portfolio``, its per-step results, the dates it
+        re-optimized on, and the portfolio's daily value.
+    """
     from portfolio_optimization import rebalance
 
-    rebalancing = config.rebalancing
-    dates = load_prices(universe_path).index
-    settings, generator = backtest_scenarios(
-        arm,
-        num_scen=config.num_scen,
-        seed=rebalancing_seed(config.seed, trial.index),
-    )
-    recorder = DecisionRecorder(params.confidence)
-    start = time.perf_counter()
     rebalancer = rebalance.rebalance_portfolio(
         dataset_directory=str(universe_path),
         returns_compute_settings=RETURNS_SETTINGS,
@@ -285,17 +290,51 @@ def run_backtest(
         look_back_window=rebalancing.look_back_days,
         # Each run gets its own copy, so no run can change another's constraints.
         cvar_params=copy.deepcopy(params),
-        solver_settings=solver_settings(rebalancing.solver),
+        solver_settings=solver_settings(solver),
         re_optimize_criteria={
             "type": rebalancing.trigger,
             "threshold": rebalancing.pct_change_threshold,
         },
-        api_settings=ApiSettings(scale_risk_aversion=False),
+        api_settings=backtest_api_settings(),
         risk_free_rate=risk_free_rates,
-        decision_observer=recorder,
+        decision_observer=observer,
     )
     results, re_optimize_dates, value = rebalancer.re_optimize(
         transaction_cost_factor=rebalancing.transaction_cost
+    )
+    return rebalancer, results, re_optimize_dates, value
+
+
+def run_backtest(
+    arm: AnyArm,
+    trial: Trial,
+    window: TradingWindow,
+    universe_path: Path,
+    params: CvarParameters,
+    config: ExperimentConfig,
+    risk_free_rates: pd.Series,
+) -> dict:
+    """One rebalancing run of ``arm`` on a trial's universe and window."""
+    rebalancing = config.rebalancing
+    dates = load_prices(universe_path).index
+    settings, generator = backtest_scenarios(
+        arm,
+        num_scen=config.num_scen,
+        seed=rebalancing_seed(config.seed, trial.index),
+    )
+    recorder = DecisionRecorder(params.confidence)
+    start = time.perf_counter()
+    rebalancer, results, re_optimize_dates, value = run_rebalancer(
+        dates,
+        universe_path,
+        window,
+        params,
+        rebalancing,
+        risk_free_rates,
+        settings=settings,
+        generator=generator,
+        observer=recorder,
+        solver=rebalancing.solver,
     )
     seconds = time.perf_counter() - start
     readings = backtest_readings(
@@ -390,8 +429,9 @@ def rebalancing_identity(
     """Everything a rebalancing results file depends on, apart from the trial count."""
     identity = run_identity(config, arms, prices, (), services)
     del identity["measurements"]
-    extra = ("cvxpy", "cuopt") if config.rebalancing.solver == "CUOPT" else ("cvxpy",)
-    identity["packages"] = package_versions(arms, extra)
+    identity["packages"] = package_versions(
+        arms, ("cvxpy", SOLVERS_BY_NAME[config.rebalancing.solver].module)
+    )
     identity["host"] = host_metadata(arms)
     identity["rebalancing"] = config.rebalancing.model_dump(
         mode="json", exclude={"output", "scenario_results", "arms", "trials"}

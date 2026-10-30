@@ -9,7 +9,12 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from experiments.simulator_comparison.config import ExperimentConfig, load_config
+from experiments.simulator_comparison.config import (
+    DevicesConfig,
+    ExperimentConfig,
+    load_config,
+    load_devices_config,
+)
 
 CONFIG_DIR = Path(__file__).parents[1] / "experiments/simulator_comparison/configs"
 
@@ -29,7 +34,7 @@ PILOT_TWINS = ["next_day", "long_history"]
     [f"{base}.yaml" for base in SETS]
     + [f"{base}_risk_averse.yaml" for base in SETS]
     + [f"pilot_{twin}.yaml" for twin in PILOT_TWINS]
-    + ["timing.yaml", "readout.yaml"],
+    + ["readout.yaml"],
 )
 def test_shipped_configs_are_valid(name):
     config = load_config(CONFIG_DIR / name)
@@ -48,7 +53,7 @@ def _without_outputs(values):
     "name",
     [f"{base}.yaml" for base in SETS]
     + [f"pilot_{twin}.yaml" for twin in PILOT_TWINS]
-    + ["timing.yaml", "readout.yaml"],
+    + ["readout.yaml"],
 )
 def test_report_reads_the_size_curves_of_its_own_scenario_comparison(name):
     config = load_config(CONFIG_DIR / name)
@@ -183,4 +188,54 @@ def test_horizons_start_at_the_next_day_and_fit_the_forward_window(horizons, mes
     """Horizons start at 1, increase, and end within the forward returns."""
     values = _shipped("pilot.yaml") | {"horizons": horizons}
     with pytest.raises(ValidationError, match=message):
+        ExperimentConfig.model_validate(values)
+
+
+@pytest.mark.parametrize("name", ["devices.yaml", "devices_pilot.yaml"])
+def test_shipped_devices_configs_measure_the_full_backtests_decisions(name):
+    """The pilot runs the first of the full run's trials with the same pipelines."""
+    devices, experiment = load_devices_config(CONFIG_DIR / name)
+    assert experiment == load_config(CONFIG_DIR / "full.yaml")
+    assert devices.report_dir.name == f"{devices.output.stem}_report"
+    full, _ = load_devices_config(CONFIG_DIR / "devices.yaml")
+    assert devices.trials <= full.trials
+    for field in ("num_scen", "gpu_solver", "cpu_solver", "paired_solvers"):
+        assert getattr(devices, field) == getattr(full, field)
+
+
+@pytest.mark.parametrize(
+    "change, message",
+    [
+        ({"gpu_solver": "HIGHS"}, "computes on the CPU"),
+        ({"cpu_solver": "CUOPT"}, "load without a GPU"),
+        ({"cpu_solver": "CUOPT_DUAL_SIMPLEX"}, "load without a GPU"),
+        ({"cpu_solver": "SCIPY"}, "Unknown solvers"),
+        ({"paired_solvers": ["CUOPT", "CLARABEL"]}, "must list the pipelines"),
+        ({"paired_solvers": ["CUOPT", "HIGHS", "HIGHS"]}, "only once"),
+        ({"sweep_num_scen": [10000, 20000]}, "leave out num_scen"),
+        ({"sweep_num_scen": [50000, 20000]}, "strictly increasing"),
+        ({"generators": ["jointfm"]}, "Unknown generators"),
+        ({"generators": ["kde-cpu", "kde-cpu"]}, "only once"),
+    ],
+)
+def test_devices_pipelines_and_solvers_must_fit(change, message):
+    values = _shipped("devices.yaml") | change
+    with pytest.raises(ValidationError, match=message):
+        DevicesConfig.model_validate(values)
+
+
+def test_devices_trials_must_be_backtested(tmp_path):
+    values = _shipped("devices.yaml")
+    values["experiment"] = str(CONFIG_DIR / "full.yaml")
+    values["trials"] = load_config(CONFIG_DIR / "full.yaml").rebalancing.trials + 1
+    path = tmp_path / "devices.yaml"
+    path.write_text(yaml.safe_dump(values))
+    with pytest.raises(ValueError, match="rebalancing backtest runs"):
+        load_devices_config(path)
+
+
+def test_rebalancing_solvers_must_be_known():
+    values = _shipped("pilot.yaml")
+    values["rebalancing"]["solver"] = "GUROBI"
+    with pytest.raises(ValidationError, match="Unknown solvers"):
         ExperimentConfig.model_validate(values)

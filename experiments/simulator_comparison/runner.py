@@ -138,14 +138,16 @@ def _cpu_model() -> str:
     raise RuntimeError(f"Unsupported platform {system!r}.")
 
 
-def _gpu() -> dict[str, str]:
-    """The first visible GPU, the one this process's cuML work runs on."""
-    first = visible_gpus()[0]
+def gpu_info(entry: str) -> dict[str, str]:
+    """Name, driver, and UUID of the GPU an index or UUID names, as nvidia-smi reports them.
+
+    ``entry`` counts physical GPUs, as a ``CUDA_VISIBLE_DEVICES`` entry does.
+    """
     name, driver, uuid = (
         subprocess.run(
             [
                 "nvidia-smi",
-                f"--id={first}",
+                f"--id={entry}",
                 "--query-gpu=name,driver_version,uuid",
                 "--format=csv,noheader",
             ],
@@ -176,7 +178,8 @@ def host_metadata(arms: Sequence[AnyArm]) -> dict:
         "python": platform.python_version(),
         "cpu": _cpu_model(),
         "logical_cores": os.cpu_count(),
-        "gpu": _gpu() if in_process_gpu else None,
+        # The first visible GPU is the one this process's cuML work runs on.
+        "gpu": gpu_info(visible_gpus()[0]) if in_process_gpu else None,
     }
 
 

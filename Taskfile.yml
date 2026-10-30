@@ -8,8 +8,8 @@
 #
 # The experiments read .env themselves, through the library's defaults, so this
 # file loads none: services and GPUs are configured in .env alone. Only
-# experiments:timing sets JOINTFM_LOCAL_BASE_URL per session, which overrides
-# the same variable in .env.
+# experiments:devices sets JOINTFM_LOCAL_BASE_URL per session, which overrides
+# the same variable in .env, and hides every GPU from its CPU session.
 #
 # Every task ends with an echo "<task> succeeded ..." command, so a finished
 # task says so explicitly; Task stops at the first failing command, so the
@@ -156,16 +156,16 @@ tasks:
   experiments:blog:
     desc: >-
       Blog figures of the scenario and rebalancing results of CONFIG (default
-      full.yaml) and of the JointFM timing results of TIMING_CONFIG (default
-      timing.yaml, filled by experiments:timing), written to <output
+      full.yaml) and of the CPU-against-GPU results of DEVICES_CONFIG (default
+      devices.yaml, filled by experiments:devices), written to <output
       stem>_blog beside them, without running anything
     vars:
       CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/full.yaml")}}'
-      TIMING_CONFIG: '{{.TIMING_CONFIG | default (print .CONFIG_DIR "/timing.yaml")}}'
+      DEVICES_CONFIG: '{{.DEVICES_CONFIG | default (print .CONFIG_DIR "/devices.yaml")}}'
     cmds:
       - >-
         uv run --extra experiments python -m experiments.simulator_comparison.blog
-        --config {{.CONFIG}} --timing-config {{.TIMING_CONFIG}}
+        --config {{.CONFIG}} --devices-config {{.DEVICES_CONFIG}}
       - echo "experiments:blog succeeded for {{.CONFIG}}"
 
   experiments:paired:
@@ -215,28 +215,56 @@ tasks:
         vars: {CONFIG: '{{.CONFIG}}'}
       - echo "experiments:fresh succeeded for {{.CONFIG}}"
 
-  experiments:timing:
+  experiments:devices:
     desc: >-
-      JointFM CPU-against-GPU timing from scratch (default timing.yaml): one
-      session per service, GPU_URL then CPU_URL, each set as
-      JOINTFM_LOCAL_BASE_URL over .env, then the report
+      CPU-against-GPU experiment of CONFIG (default devices.yaml), resuming its
+      results: the GPU session against the local JointFM service at GPU_URL,
+      then the CPU session against the one at CPU_URL with every GPU hidden,
+      each URL set as JOINTFM_LOCAL_BASE_URL over .env, then its report
     requires:
       vars: [GPU_URL, CPU_URL]
     vars:
-      CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/timing.yaml")}}'
+      CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/devices.yaml")}}'
+    cmds:
+      - >-
+        JOINTFM_LOCAL_BASE_URL={{.GPU_URL}} {{.UV_EXPERIMENTS}} python -m
+        experiments.simulator_comparison.devices --config {{.CONFIG}} --device GPU
+      - >-
+        CUDA_VISIBLE_DEVICES= JOINTFM_LOCAL_BASE_URL={{.CPU_URL}}
+        {{.UV_EXPERIMENTS}} python -m experiments.simulator_comparison.devices
+        --config {{.CONFIG}} --device CPU
+      - task: experiments:devices-report
+        vars: {CONFIG: '{{.CONFIG}}'}
+      - echo "experiments:devices succeeded for {{.CONFIG}}"
+
+  experiments:devices-fresh:
+    desc: >-
+      Delete every output of the CPU-against-GPU configuration CONFIG (default
+      devices.yaml), then run experiments:devices from scratch
+    requires:
+      vars: [GPU_URL, CPU_URL]
+    vars:
+      CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/devices.yaml")}}'
     cmds:
       - >-
         uv run --extra experiments python -m experiments.simulator_comparison.clean
-        --config {{.CONFIG}}
+        --devices-config {{.CONFIG}}
+      - task: experiments:devices
+        vars: {CONFIG: '{{.CONFIG}}', GPU_URL: '{{.GPU_URL}}', CPU_URL: '{{.CPU_URL}}'}
+      - echo "experiments:devices-fresh succeeded for {{.CONFIG}}"
+
+  experiments:devices-report:
+    desc: >-
+      Tables and figures of the CPU-against-GPU results of CONFIG (default
+      devices.yaml), written to <output stem>_report beside them, without
+      running anything
+    vars:
+      CONFIG: '{{.CONFIG | default (print .CONFIG_DIR "/devices.yaml")}}'
+    cmds:
       - >-
-        JOINTFM_LOCAL_BASE_URL={{.GPU_URL}} {{.UV_EXPERIMENTS}} python -m
-        experiments.simulator_comparison --config {{.CONFIG}}
-      - >-
-        JOINTFM_LOCAL_BASE_URL={{.CPU_URL}} {{.UV_EXPERIMENTS}} python -m
-        experiments.simulator_comparison --config {{.CONFIG}}
-      - task: experiments:report
-        vars: {CONFIG: '{{.CONFIG}}'}
-      - echo "experiments:timing succeeded for {{.CONFIG}}"
+        uv run --extra experiments python -m
+        experiments.simulator_comparison.devices_report --config {{.CONFIG}}
+      - echo "experiments:devices-report succeeded for {{.CONFIG}}"
 
   experiments:suite:
     internal: true
@@ -384,5 +412,6 @@ tasks:
         tests/test_simulator_rebalancing.py tests/test_simulator_clean.py
         tests/test_simulator_portfolios.py tests/test_simulator_horizons.py
         tests/test_simulator_swaps.py tests/test_simulator_chosen.py
-        tests/test_simulator_attribution.py tests/test_simulator_paired.py -q
+        tests/test_simulator_attribution.py tests/test_simulator_paired.py
+        tests/test_simulator_blog.py tests/test_simulator_devices.py -q
       - echo "experiments:test succeeded"

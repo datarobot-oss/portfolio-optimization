@@ -3,8 +3,8 @@
 
 """The blog figures of the simulator comparison in experiments/: which arms they
 draw, the readings they compute, and the files they write, on hand-built runs
-and on a small scenario comparison and rebalancing backtest with the fake
-JointFM client of conftest.py."""
+and on a small scenario comparison, rebalancing backtest, and CPU-against-GPU
+experiment with the fake JointFM client and device stand-ins of conftest.py."""
 
 import numpy as np
 import pandas as pd
@@ -13,26 +13,27 @@ import pytest
 from experiments.simulator_comparison.blog import (
     BLOG_RANKING_SCORES,
     BLOG_SKILL_SCORES,
-    DEVICE_RATIO,
+    CHANGE_READING,
     PERFORMANCE_METRICS,
-    REGIME_METRICS,
     RISK_FREE_ROW,
+    SIZE_READING,
     _dot_groups,
     blog_styles,
-    device_runtime_table,
     growth_table,
     performance_table,
     risk_free_return,
     risk_return_table,
+    size_change_frame,
+    universe_size_table,
     write_blog,
 )
-from experiments.simulator_comparison.config import ExperimentConfig
+from experiments.simulator_comparison.config import DevicesConfig, ExperimentConfig
+from experiments.simulator_comparison.devices_report import device_tables
 from experiments.simulator_comparison.rebalancing import (
     METRICS,
     run_rebalancing_experiment,
 )
 from experiments.simulator_comparison.rebalancing_report import per_trial_frame
-from experiments.simulator_comparison.regimes import OVERALL, REGIMES
 from experiments.simulator_comparison.runner import run_experiment
 from experiments.simulator_comparison.scores import PortfolioScores, ScenarioScores
 from experiments.simulator_comparison.table import read_results
@@ -45,13 +46,14 @@ STEP_DAYS = 5
 FIGURES = (
     "ranking",
     "skill_horizons",
-    "volatility_regimes",
     "growth",
     "risk_return",
     "performance",
     "universe_sizes",
     "runtime",
     "runtime_devices",
+    "solvers",
+    "solver_sizes",
 )
 TABLES = FIGURES
 
@@ -96,6 +98,76 @@ def _runs(step_returns: dict[str, list[list[float]]]) -> pd.DataFrame:
             for trial, path in enumerate(paths)
         ]
     )
+
+
+def _sized_runs(slopes: dict[str, list[float]], sizes: list[int]) -> pd.DataFrame:
+    """Runs whose every reading is trial-specific noise plus ``slopes[arm][trial]`` per asset."""
+    arms = {"no_fit-cpu": ("no_fit", "CPU"), "jointfm-gpu": ("jointfm", "GPU")}
+    rng = np.random.default_rng(0)
+    rows = []
+    for arm, per_trial in slopes.items():
+        for trial, slope in enumerate(per_trial):
+            offset = rng.normal()
+            for size in sizes:
+                level = offset + slope * size
+                rows.append(
+                    {"trial": trial, "arm": arm, "size": size}
+                    | {metric: level for metric in METRICS}
+                    | dict(zip(("fit_type", "device"), arms[arm]))
+                )
+    return pd.DataFrame(rows)
+
+
+def test_size_change_is_the_fitted_slope_over_the_span_of_sizes():
+    """A reading linear in the size changes by its slope times the span, whatever
+    the spacing of the sizes and the trial's own level."""
+    sizes = [10, 20, 50, 100]
+    runs = _sized_runs(
+        {"no_fit-cpu": [0.0, 0.001], "jointfm-gpu": [0.002, 0.003]}, sizes
+    )
+    changes = size_change_frame(runs, sizes)
+    np.testing.assert_allclose(
+        changes.loc[
+            [
+                (0, "no_fit-cpu"),
+                (1, "no_fit-cpu"),
+                (0, "jointfm-gpu"),
+                (1, "jointfm-gpu"),
+            ],
+            "total_return",
+        ],
+        [0.0, 0.09, 0.18, 0.27],
+        atol=1e-12,
+    )
+    assert changes.loc[(0, "jointfm-gpu"), "fit_type"] == "jointfm"
+
+
+def test_size_change_refuses_a_trial_missing_a_size():
+    sizes = [10, 20, 30]
+    runs = _sized_runs({"no_fit-cpu": [0.0], "jointfm-gpu": [0.001]}, sizes)
+    runs = runs[~((runs["arm"] == "jointfm-gpu") & (runs["size"] == 20))]
+    with pytest.raises(ValueError, match="each of the sizes"):
+        size_change_frame(runs, sizes)
+
+
+def test_universe_size_table_adds_the_change_against_the_window():
+    """Change rows carry no size; JointFM's lead grows by its extra slope times the span."""
+    sizes = [10, 40, 100]
+    runs = _sized_runs(
+        {"no_fit-cpu": [0.0, 0.0, 0.0], "jointfm-gpu": [0.001, 0.001, 0.001]}, sizes
+    )
+    styles = blog_styles(per_trial_frame(runs[runs["size"] == sizes[0]]))
+    table = universe_size_table(runs, styles, sizes)
+    at_sizes = table[table["reading"] == SIZE_READING]
+    assert sorted(at_sizes["size"].unique()) == sizes
+    change = table[table["reading"] == CHANGE_READING].set_index(["metric", "arm"])
+    assert change["size"].isna().all()
+    jointfm = change.loc[("total_return", "jointfm-gpu")]
+    assert jointfm["mean"] == pytest.approx(0.09)
+    assert jointfm["difference"] == pytest.approx(0.09)
+    assert jointfm["trials_better"] == 3
+    # A deepening drawdown is worse, so a larger change of it is no win.
+    assert change.loc[("max_drawdown", "jointfm-gpu"), "trials_better"] == 0
 
 
 def test_growth_compounds_steps_and_reads_drawdown_at_step_ends():
@@ -224,7 +296,7 @@ def test_cash_compounds_each_trials_rates_to_an_annual_return():
 
 
 @pytest.fixture(scope="module")
-def blog(tmp_path_factory, module_fake_jointfm):
+def blog(tmp_path_factory, module_fake_jointfm, device_sessions):
     """A small comparison and backtest of the window, Gaussian, and fake JointFM
     arms, with the blog written from them once per module."""
     # The fake service's draws scatter around the last log price.
@@ -233,12 +305,7 @@ def blog(tmp_path_factory, module_fake_jointfm):
     directory = tmp_path_factory.mktemp("blog")
     rows = 320
     rng = np.random.default_rng(3)
-    time = np.arange(rows)[:, None]
-    # Volatility drifts, so the origins spread over the volatility terciles.
-    volatility = 0.01 * (1.5 + np.cos(time / 23.0))
-    returns = volatility * (
-        rng.normal(size=(rows, 1)) + rng.normal(size=(rows, ASSETS + 2))
-    )
+    returns = 0.015 * (rng.normal(size=(rows, 1)) + rng.normal(size=(rows, ASSETS + 2)))
     dates = pd.date_range("2019-01-01", periods=rows, freq="B")
     prices_path = directory / "prices.csv"
     pd.DataFrame(
@@ -301,27 +368,25 @@ def blog(tmp_path_factory, module_fake_jointfm):
     run_experiment(config, [ScenarioScores(), portfolios])
     run_rebalancing_experiment(config)
     run_universe_size_experiment(config)
-    return config, write_blog(config, _device_timing(config, module_fake_jointfm))
+    return config, write_blog(config, _device_results(config, device_sessions))
 
 
-def _device_timing(config, fake_jointfm, devices=("cuda", "cpu")):
-    """Next-day results of the window and JointFM, one session per service device,
-    as task experiments:timing measures them; returns the results file."""
-    timing = config.model_copy(
-        update={
-            "output": config.output.with_name(f"timing_{'_'.join(devices)}.parquet"),
-            "arms": ("no_fit-cpu", "jointfm"),
-            "horizons": (1,),
-        }
+def _device_results(config, device_sessions):
+    """Both sessions of a CPU-against-GPU experiment on the backtest of ``config``,
+    as task experiments:devices runs them; returns the results file."""
+    devices = DevicesConfig(
+        experiment=config.output.with_name("experiment.yaml"),
+        output=config.output.with_name("devices.parquet"),
+        trials=config.rebalancing.trials,
+        num_scen=50,
+        gpu_solver="CUOPT",
+        cpu_solver="CLARABEL",
+        paired_solvers=("CUOPT", "CLARABEL"),
+        sweep_num_scen=(100,),
+        sweep_decisions=1,
+        generators=("no_fit-cpu",),
     )
-    portfolios = PortfolioScores(
-        timing.portfolio_sizes, timing.rebalancing.cvar, timing.assets
-    )
-    for device in devices:
-        fake_jointfm.device = device
-        run_experiment(timing, [ScenarioScores(), portfolios])
-    fake_jointfm.device = "cpu"
-    return timing.output
+    return device_sessions(devices, config)
 
 
 def test_writes_only_the_blog_figures_and_their_tables(blog):
@@ -349,12 +414,6 @@ def test_scenario_tables_hold_the_blog_scores_of_every_simulator(blog):
     assert set(skills["score"]) == set(BLOG_SKILL_SCORES)
     assert set(skills["horizon"]) == set(config.horizons)
     assert set(skills["arm"]) == simulators - {"no_fit-cpu"}
-    regimes = pd.read_csv(config.blog_dir / "volatility_regimes.csv")
-    assert set(regimes["regime"]) == {OVERALL, *REGIMES}
-    assert set(regimes["metric"]) == set(REGIME_METRICS)
-    assert len(regimes) == len({OVERALL, *REGIMES}) * len(REGIME_METRICS) * 3
-    assert regimes.loc[regimes["regime"] == OVERALL, "low"].isna().all()
-    assert (regimes.loc[regimes["regime"] != OVERALL, "low"] > 0).all()
 
 
 def test_growth_ends_at_each_simulators_mean_total_return(blog):
@@ -384,6 +443,9 @@ def test_universe_sizes_read_every_size_and_equal_the_backtest_at_full_size(blog
     are the performance figure's."""
     config, _ = blog
     table = pd.read_csv(config.blog_dir / "universe_sizes.csv")
+    assert set(table["reading"]) == {SIZE_READING, CHANGE_READING}
+    assert table.loc[table["reading"] == CHANGE_READING, "size"].isna().all()
+    table = table[table["reading"] == SIZE_READING]
     assert sorted(table["size"].unique()) == list(config.universe_sizes.sizes)
     assert set(table["metric"]) == {"total_return", "max_drawdown"}
     assert set(table["arm"]) == {"no_fit-cpu", "gaussian-cpu", "jointfm-cpu"}
@@ -414,36 +476,17 @@ def test_risk_return_draws_the_performance_means_and_cash_at_its_rate(blog):
     )
 
 
-def test_runtime_devices_reads_jointfm_on_each_device_and_their_ratio(blog):
+def test_the_speed_figures_draw_the_device_reports_tables(blog):
+    """The blog's speed numbers equal the CPU-against-GPU report's."""
     config, _ = blog
-    table = pd.read_csv(config.blog_dir / "runtime_devices.csv")
-    seconds = table[table["reading"] == "seconds"].set_index("device")
-    assert list(seconds["arm"]) == ["jointfm-cpu", "jointfm-gpu"]
-    timed, _ = read_results(config.output.with_name("timing_cuda_cpu.parquet"))
-    timed = timed[~timed["warmup"]]
-    per_trial = timed.groupby(["arm", "trial"])["seconds"].mean()
-    np.testing.assert_allclose(
-        seconds["estimate"],
-        [per_trial["jointfm-cpu"].mean(), per_trial["jointfm-gpu"].mean()],
-    )
-    ratio = table[table["reading"] == DEVICE_RATIO].iloc[0]
-    assert ratio["estimate"] == pytest.approx(
-        np.median(per_trial["jointfm-cpu"] / per_trial["jointfm-gpu"])
-    )
-    assert ratio["ci_low"] <= ratio["estimate"] <= ratio["ci_high"]
-
-
-def test_device_timing_beyond_the_next_day_is_refused(blog):
-    config, _ = blog
-    with pytest.raises(ValueError, match="next day only"):
-        device_runtime_table(config.output)
-
-
-def test_device_timing_without_both_devices_is_refused(blog, module_fake_jointfm):
-    config, _ = blog
-    one_device = _device_timing(config, module_fake_jointfm, devices=("cuda",))
-    with pytest.raises(ValueError, match="no JointFM arm on both devices"):
-        device_runtime_table(one_device)
+    tables = device_tables(config.output.with_name("devices.parquet"))
+    for name, table in tables.items():
+        pd.testing.assert_frame_equal(
+            # A ratio row leaves its device empty, which is no missing value.
+            pd.read_csv(config.blog_dir / f"{name}.csv", keep_default_na=False),
+            table,
+            check_dtype=False,
+        )
 
 
 def test_a_rate_file_other_than_the_backtests_is_refused(blog, tmp_path):
@@ -459,4 +502,4 @@ def test_a_rate_file_other_than_the_backtests_is_refused(blog, tmp_path):
         }
     )
     with pytest.raises(ValueError, match="risk-free rate file"):
-        write_blog(changed, config.output.with_name("timing_cuda_cpu.parquet"))
+        write_blog(changed, config.output.with_name("devices.parquet"))

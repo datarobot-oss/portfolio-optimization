@@ -14,7 +14,9 @@ the simulator. Each size calibrates its own risk aversion on its own assets
 (``rebalancing.calibrated_cvar_params``), as a trial of that size would.
 
 The blog reads the results (``complete_universe_runs``) to draw each
-simulator's total return and maximum drawdown over the sizes.
+simulator's total return over the sizes and to read each simulator's change
+in total return and maximum drawdown from the smallest to the largest size
+(``blog.universe_size_table``).
 """
 
 import argparse

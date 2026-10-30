@@ -42,8 +42,10 @@ jointfm = [
 ]
 # Runs under experiments/, which are not part of the package: the simulator
 # comparison reads its YAML configuration, writes its results table as
-# Parquet, scores with SciPy, and reports progress with tqdm.
+# Parquet, scores with SciPy, reports progress with tqdm, and reads the JointFM
+# service's process and the host's CPU use with psutil.
 experiments = [
+    "psutil>=7.1",
     "pyarrow>=21",
     "pyyaml>=6.0",
     "scipy>=1.13",

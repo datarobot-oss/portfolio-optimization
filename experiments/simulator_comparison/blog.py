@@ -7,7 +7,8 @@ The two reports (``report``, ``rebalancing_report``) draw every reading of
 every arm, so they show where JointFM needs to improve as much as where it
 leads. This module draws only the readings the blog post builds its story on,
 for the scenario simulators, from the scenario and rebalancing results one
-configuration names and the results of the JointFM timing, into ``<output stem>_blog/`` beside the scenario results
+configuration names and the results of the CPU-against-GPU experiment
+(``devices.py``), into ``<output stem>_blog/`` beside the scenario results
 (``ExperimentConfig.blog_dir``). Each figure is a PNG and an SVG, with a CSV
 of exactly the numbers it draws.
 
@@ -15,8 +16,6 @@ of exactly the numbers it draws.
   trials with the best next-day score.
 - ``skill_horizons``: skill against replaying the window per score of
   ``BLOG_SKILL_SCORES``, over the horizons.
-- ``volatility_regimes``: next-day spread and 90 % interval coverage over all
-  origins and per tercile of the volatility ratio (``regimes``).
 - ``growth``: the rebalanced portfolio's mean cumulative return and the mean of
   each trial's drawdown from its own running peak after every step.
 - ``risk_return``: each simulator's mean annualized volatility against its mean
@@ -25,16 +24,19 @@ of exactly the numbers it draws.
   cash is steepest (``risk_return_table``).
 - ``performance``: every reading of ``PERFORMANCE_METRICS``, with the number of
   trials in which each simulator did better than replaying the window.
-- ``universe_sizes``: each simulator's mean total return and maximum drawdown
-  over the universe sizes of the nested-subset backtest (``universe_sizes``).
-- ``runtime``: each simulator's mean seconds per scenario-generation call.
-- ``runtime_devices``: JointFM's mean seconds per next-day request on a CPU
-  and a GPU service, and their ratio, from a timing configuration's results.
+- ``universe_sizes``: each simulator's mean total return over the universe
+  sizes of the nested-subset backtest (``universe_sizes``), JointFM against the
+  band of the other simulators; its CSV adds the maximum drawdown and each
+  reading's change from the smallest to the largest size
+  (``universe_size_table``).
+- ``runtime``, ``runtime_devices``, ``solvers``, and ``solver_sizes``: the
+  CPU-against-GPU experiment's tables (``devices_report``).
 
-Every statistic comes from ``analysis``, ``regimes``, and
-``rebalancing_report``, so the numbers equal the reports'. The figures name the
-simulators as the post does (``BLOG_NAMES``) and draw one arm per simulator,
-so each name appears once: its GPU arm where it ran on both devices. Titles
+Every statistic comes from ``analysis`` and ``rebalancing_report``, so the
+numbers equal the reports'. The figures name the
+simulators as the post does (``BLOG_NAMES``), and the scenario and
+rebalancing figures draw one arm per simulator, so each name appears once:
+its GPU arm where it ran on both devices. Titles
 describe what is drawn and never state a finding, because the same figures
 re-render from every run.
 """
@@ -50,12 +52,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
-from matplotlib.ticker import (
-    LogLocator,
-    NullLocator,
-    PercentFormatter,
-    StrMethodFormatter,
-)
+from matplotlib.ticker import PercentFormatter
 
 from portfolio_optimization import risk_free
 
@@ -67,13 +64,20 @@ from .analysis import (
     skill,
     skill_summary,
     stack_horizons,
-    timing,
 )
-from .config import ExperimentConfig, load_config
+from .blog_style import (
+    BLOG_NAMES,
+    SUBTITLE_SIZE,
+    TEXT_SIZE,
+    _axis_labels,
+    _headline,
+    _panel_title,
+    _style_text,
+)
+from .config import ExperimentConfig, load_config, load_devices_config
+from .devices_report import device_tables, write_device_figures
 from .plotting import (
-    DEVICE_ORDER,
     GRID,
-    INK,
     INK_SECONDARY,
     INTERVAL_MARKER_AREA,
     LINE_WIDTH,
@@ -88,6 +92,7 @@ from .plotting import (
     _target_line,
     simulator_styles,
 )
+from .rebalancing import METRICS
 from .rebalancing_report import (
     METRIC_LABELS,
     PERCENT,
@@ -96,27 +101,13 @@ from .rebalancing_report import (
     per_trial_frame,
     summary,
 )
-from .regimes import (
-    OVERALL,
-    REGIMES,
-    check_prices,
-    origin_features,
-    regime_readings,
-    terciles,
-)
-from .report import ReportOutputs, _check_scores_recorded, _duration
+from .regimes import check_prices
+from .report import ReportOutputs, _check_scores_recorded
 from .runner import load_prices
-from .scores import PORTFOLIO_CRPS, TRAILING_STD_WINDOW
+from .scores import PORTFOLIO_CRPS
 from .table import read_results
 from .universe_sizes import complete_universe_runs
 
-# The simulators as the post names them.
-BLOG_NAMES = {
-    "no_fit": "Historical",
-    "gaussian": "Gaussian",
-    "kde": "KDE",
-    "jointfm": "JointFM",
-}
 NEXT_DAY = 1
 # (title, what the score reads) per ranking score; the variogram score that
 # ``analysis.RANKING_SCORES`` also ranks by is left to the report.
@@ -127,26 +118,6 @@ BLOG_RANKING_SCORES = {
 BLOG_SKILL_SCORES = {
     "energy_score": ("Energy score", "all assets of the universe jointly"),
     "crps": ("CRPS", "each asset on its own"),
-}
-REGIME_FEATURE = "volatility_ratio"
-REGIME_LABELS = {
-    OVERALL: "All origins",
-    "low": "Volatility\nfalling",
-    "middle": "Volatility\nsteady",
-    "high": "Volatility\nrising",
-}
-# (title, axis label, target) per reading of the regime figure.
-REGIME_METRICS = {
-    "spread": (
-        "Scenario width",
-        f"scenario std over the last {TRAILING_STD_WINDOW} days' volatility",
-        1.0,
-    ),
-    "cover_90": (
-        "90 % interval coverage",
-        "share of realized returns inside the interval",
-        0.9,
-    ),
 }
 PERFORMANCE_METRICS = (
     "annualized_return",
@@ -165,23 +136,27 @@ LEVEL_UNITS = {
     "max_drawdown": "% below the running peak",
     "calmar_ratio": "annualized return over max drawdown",
 }
-# Readings of the rebalanced portfolio drawn over the universe sizes.
+# Readings of the rebalanced portfolio over the universe sizes: the figure
+# draws the first, and the post's text cites both from the CSV.
 UNIVERSE_SIZE_METRICS = ("total_return", "max_drawdown")
+# ``reading`` of a universe_sizes.csv row: the levels at one size, or the
+# change over all sizes (``universe_size_table``).
+SIZE_READING = "size"
+CHANGE_READING = "change"
+# The simulator the post is about; the universe-size figure draws the others
+# as one group against it.
+FOCUS_FIT_TYPE = "jointfm"
+FOCUS_LINE_WIDTH = 3
+GROUP_LINE_WIDTH = 1.2
+# Opacity of the band between the other simulators' lowest and highest mean.
+GROUP_SHADE = 0.15
 # Display decimals of a level: percentages to a tenth, ratios to a hundredth.
 PERCENT_DECIMALS = 1
 RATIO_DECIMALS = 2
-# Sized for a figure shown about 700 px wide in a post.
-HEADLINE_SIZE = 15
-TITLE_SIZE = 12
-TEXT_SIZE = 10.5
-SUBTITLE_SIZE = 9.5
-TITLE_PAD = 22
 # Vertical gap between two end labels, as a share of the axis height.
 LABEL_GAP = 0.07
 # Room right of the longest horizon for the end labels, as a factor on it.
 END_LABEL_ROOM = 2.6
-# Share of a regime column that its arms spread across.
-REGIME_GROUP_WIDTH = 0.6
 # Steps between two labeled ticks of the growth figure.
 GROWTH_TICK_STEPS = 3
 # Room right of the widest interval for its value label, as a share of the range.
@@ -198,14 +173,6 @@ FRONTIER_SHADE = 0.1
 DOT_OVERLAP = 0.03
 # Offset of a dot's label from its center, in points.
 DOT_LABEL_OFFSET = 8, 6
-# Room left of the fastest interval and right of the slowest for its value
-# label, as factors on a log axis of seconds.
-SECONDS_LEFT_ROOM = 1.5
-SECONDS_RIGHT_ROOM = 4.0
-# Labeled steps within each decade of a log axis of seconds.
-SECONDS_TICK_STEPS = (1.0, 2.0, 5.0)
-# The reading of runtime_devices.csv that holds the CPU-to-GPU time ratio.
-DEVICE_RATIO = "cpu_over_gpu"
 
 
 @dataclass(frozen=True)
@@ -268,23 +235,6 @@ def skill_table(
     }
     stacked = stack_horizons(summaries)
     return stacked[stacked["score"].isin(BLOG_SKILL_SCORES)].reset_index(drop=True)
-
-
-def regime_table(
-    readings: pd.DataFrame, bounds: pd.DataFrame, styles: Sequence[BlogStyle]
-) -> pd.DataFrame:
-    """The ``REGIME_METRICS`` of ``regime_readings``' summary over all origins and
-    per tercile of ``REGIME_FEATURE``, for the drawn simulators, with each
-    tercile's feature bounds."""
-    rows = readings[
-        readings["feature"].isin([OVERALL, REGIME_FEATURE])
-        & readings["metric"].isin(REGIME_METRICS)
-        & readings["arm"].isin([style.name for style in styles])
-    ]
-    tercile_bounds = bounds.loc[
-        bounds["feature"] == REGIME_FEATURE, ["regime", "low", "high", "origins"]
-    ]
-    return rows.merge(tercile_bounds, on="regime", how="left").reset_index(drop=True)
 
 
 def growth_table(
@@ -378,25 +328,73 @@ def performance_table(
     )
 
 
+def size_change_frame(runs: pd.DataFrame, sizes: Sequence[int]) -> pd.DataFrame:
+    """Per trial and arm, every reading's change from the smallest to the largest size.
+
+    The change is the least-squares slope of the reading over ``sizes`` times
+    their span, so it rests on every size rather than on the two ends alone,
+    whose trading-window moves would carry over into it unaveraged. Indexed
+    and labeled like ``per_trial_frame``, so ``performance_table`` reads it as
+    it reads levels.
+
+    Raises
+    ------
+    ValueError
+        If a trial lacks an arm at one of ``sizes``, which would bias its slope.
+    """
+    readings = pd.concat(
+        {size: per_trial_frame(runs[runs["size"] == size]) for size in sizes},
+        names=["size"],
+    )
+    counts = readings.groupby(["trial", "arm"]).size()
+    if (counts != len(sizes)).any():
+        raise ValueError(
+            f"Every trial and arm needs a run at each of the sizes {list(sizes)}; "
+            f"{list(counts[counts != len(sizes)].index)} do not have one."
+        )
+    centered = np.asarray(sizes, dtype=float) - np.mean(sizes)
+    weights = pd.Series(
+        centered / (centered @ centered) * (max(sizes) - min(sizes)),
+        index=pd.Index(sizes, name="size"),
+    )
+    changes = (
+        readings[list(METRICS)]
+        .mul(weights, axis=0, level="size")
+        .groupby(["trial", "arm"])
+        .sum()
+    )
+    return changes.join(
+        readings.groupby(["trial", "arm"])[["fit_type", "device"]].first()
+    )
+
+
 def universe_size_table(
     runs: pd.DataFrame, styles: Sequence[BlogStyle], sizes: Sequence[int]
 ) -> pd.DataFrame:
-    """``performance_table`` of ``UNIVERSE_SIZE_METRICS`` at every universe size.
+    """``performance_table`` of ``UNIVERSE_SIZE_METRICS`` at every size and of their change.
 
     ``runs`` holds the same trials at every size (``complete_universe_runs``),
     so a simulator's curve over the sizes changes only with the assets traded.
+    Rows with ``reading`` ``SIZE_READING`` hold the levels at ``size``. Rows
+    with ``CHANGE_READING`` and no size read ``size_change_frame`` instead:
+    ``mean`` and its interval are a simulator's mean change over the sizes,
+    ``difference`` the median over trials of how much more its reading changed
+    than ``REFERENCE_ARM``'s, with interval and p-value, and
+    ``trials_better`` the trials in which its change beat the reference's in
+    the reading's better direction.
     """
-    return pd.concat(
-        [
-            performance_table(
-                per_trial_frame(runs[runs["size"] == size]),
-                styles,
-                UNIVERSE_SIZE_METRICS,
-            ).assign(size=size)
-            for size in sizes
-        ],
-        ignore_index=True,
-    )
+    at_sizes = [
+        performance_table(
+            per_trial_frame(runs[runs["size"] == size]),
+            styles,
+            UNIVERSE_SIZE_METRICS,
+        ).assign(reading=SIZE_READING, size=size)
+        for size in sizes
+    ]
+    change = performance_table(
+        size_change_frame(runs, sizes), styles, UNIVERSE_SIZE_METRICS
+    ).assign(reading=CHANGE_READING, size=pd.NA)
+    return pd.concat([*at_sizes, change], ignore_index=True).astype({"size": "Int64"})
 
 
 def check_rates(rates_path: Path, identity: dict) -> None:
@@ -487,123 +485,6 @@ def risk_return_table(
     table = pd.concat([table, cash], ignore_index=True)
     table["trials"] = int(performance["trials"].iloc[0])
     return table
-
-
-def runtime_table(
-    per_trial: pd.DataFrame, styles: Sequence[BlogStyle], experiment: dict
-) -> pd.DataFrame:
-    """Per drawn simulator: mean seconds per scenario-generation call, with its interval.
-
-    The means are ``analysis.timing``'s, over calls without warm-up. One call
-    generates every horizon of ``experiment``, so ``assets``, ``num_scen``,
-    and ``longest_horizon`` record what a call delivered.
-    """
-    means, _ = timing(per_trial)
-    table = means.loc[[style.name for style in styles]].reset_index()
-    table["device"] = [style.device for style in styles]
-    return table.assign(
-        assets=experiment["assets"],
-        num_scen=experiment["num_scen"],
-        longest_horizon=max(experiment["horizons"]),
-    )
-
-
-def device_runtime_table(timing_results: Path) -> pd.DataFrame:
-    """JointFM's mean seconds per next-day request on a CPU and a GPU service, and their ratio.
-
-    ``timing_results`` is the results file of a timing configuration, which
-    ``task experiments:timing`` fills with one session per service. Rows of
-    reading ``seconds`` hold each device's mean over trials (``analysis.timing``);
-    the row of reading ``DEVICE_RATIO`` holds the median over trials of CPU
-    seconds over GPU seconds. Every row carries its 95 % bootstrap interval,
-    the trials it read, and the request's ``assets`` and ``num_scen``.
-
-    Raises
-    ------
-    FileNotFoundError
-        If ``timing_results`` does not exist.
-    ValueError
-        If the results hold a horizon other than the next day, since a call
-        then generates more than one next-day request, or lack JointFM on
-        either device.
-    """
-    if not timing_results.exists():
-        raise FileNotFoundError(
-            f"{timing_results} does not exist; run task experiments:timing with "
-            f"a GPU and a CPU service first."
-        )
-    frame, metadata = read_results(timing_results)
-    identity = metadata.identity
-    experiment = identity["experiment"]
-    if experiment["horizons"] != [NEXT_DAY]:
-        raise ValueError(
-            f"{timing_results} holds horizons {experiment['horizons']}; device "
-            f"timing needs the next day only, as configs/timing.yaml measures it."
-        )
-    frame, _ = complete_trials(frame, tuple(identity["arms"]), experiment["origins"], 1)
-    per_trial = aggregate(frame)
-    means, speedups = timing(per_trial)
-    fit_types = per_trial.groupby("arm")["fit_type"].first()
-    pairs = speedups[speedups["gpu_arm"].map(fit_types) == "jointfm"]
-    if pairs.empty:
-        raise ValueError(
-            f"{timing_results} holds no JointFM arm on both devices; run "
-            f"task experiments:timing with a GPU and a CPU service."
-        )
-    pair = pairs.iloc[0]
-    rows = [
-        {
-            "reading": "seconds",
-            "arm": arm,
-            "device": device,
-            "estimate": means.loc[arm, "mean_seconds"],
-            "ci_low": means.loc[arm, "ci_low"],
-            "ci_high": means.loc[arm, "ci_high"],
-            "trials": means.loc[arm, "trials"],
-        }
-        for arm, device in ((pair["cpu_arm"], "CPU"), (pair["gpu_arm"], "GPU"))
-    ]
-    rows.append(
-        {
-            "reading": DEVICE_RATIO,
-            "arm": f"{pair['cpu_arm']} / {pair['gpu_arm']}",
-            "device": "",
-            "estimate": pair["median_speedup"],
-            "ci_low": pair["ci_low"],
-            "ci_high": pair["ci_high"],
-            "trials": pair["trials"],
-        }
-    )
-    return pd.DataFrame(rows).assign(
-        assets=experiment["assets"], num_scen=experiment["num_scen"]
-    )
-
-
-def _style_text(figure) -> None:
-    for ax in figure.axes:
-        ax.tick_params(labelsize=TEXT_SIZE)
-
-
-def _headline(figure, text: str) -> None:
-    figure.suptitle(text, x=0.01, ha="left", color=INK, fontsize=HEADLINE_SIZE)
-
-
-def _panel_title(ax, title: str, subtitle: str) -> None:
-    ax.set_title(title, loc="left", color=INK, fontsize=TITLE_SIZE, pad=TITLE_PAD)
-    ax.text(
-        0,
-        1.02,
-        subtitle,
-        transform=ax.transAxes,
-        color=MUTED,
-        fontsize=SUBTITLE_SIZE,
-        va="bottom",
-    )
-
-
-def _axis_labels(ax, x: str, y: str) -> None:
-    ax.set_xlabel(x, color=INK_SECONDARY, fontsize=TEXT_SIZE)
-    ax.set_ylabel(y, color=INK_SECONDARY, fontsize=TEXT_SIZE)
 
 
 def _legend(
@@ -756,62 +637,6 @@ def plot_skill_horizons(
     )
     _style_text(figure)
     return _save(figure, directory, "skill_horizons")
-
-
-def _regime_ticks(table: pd.DataFrame) -> list[str]:
-    ticks = [REGIME_LABELS[OVERALL]]
-    for regime in REGIMES:
-        row = table[table["regime"] == regime].iloc[0]
-        ticks.append(f"{REGIME_LABELS[regime]}\n{row['low']:.2f}–{row['high']:.2f}")
-    return ticks
-
-
-def plot_volatility_regimes(
-    table: pd.DataFrame, styles: Sequence[BlogStyle], directory: Path
-) -> list[Path]:
-    """Spread and coverage over all origins and per volatility tercile, one point per simulator."""
-    groups = [OVERALL, *REGIMES]
-    offsets = np.linspace(-REGIME_GROUP_WIDTH / 2, REGIME_GROUP_WIDTH / 2, len(styles))
-    figure, axes = _figure(12, 5.4, cols=len(REGIME_METRICS))
-    for ax, (metric, (title, unit, target)) in zip(axes.flat, REGIME_METRICS.items()):
-        ax.grid(axis="y", color=GRID, linewidth=1)
-        for offset, style in zip(offsets, styles):
-            rows = table[(table["metric"] == metric) & (table["arm"] == style.name)]
-            rows = rows.set_index("regime").loc[groups]
-            positions = np.arange(len(groups)) + offset
-            ax.vlines(
-                positions,
-                rows["ci_low"],
-                rows["ci_high"],
-                color=style.color,
-                linewidth=LINE_WIDTH,
-            )
-            ax.scatter(
-                positions,
-                rows["mean"],
-                s=INTERVAL_MARKER_AREA,
-                facecolor=style.color,
-                edgecolor=SURFACE,
-                linewidth=MARKER_EDGE,
-                zorder=3,
-            )
-        _target_line(ax, target)
-        # Separates the overall column from the terciles.
-        ax.axvline(0.5, color=GRID, linewidth=1)
-        ax.set_xticks(range(len(groups)), _regime_ticks(table))
-        if metric.startswith("cover_"):
-            ax.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
-        _axis_labels(ax, "", unit)
-        _panel_title(
-            ax,
-            title,
-            f"next day; thirds of origins by the last {TRAILING_STD_WINDOW} days' "
-            f"volatility over the window's",
-        )
-    _headline(figure, "Scenario width and coverage as volatility changes")
-    _legend(figure, styles, lines=False, reference="target")
-    _style_text(figure)
-    return _save(figure, directory, "volatility_regimes")
 
 
 def plot_growth(
@@ -1016,132 +841,6 @@ def plot_risk_return(
     return _save(figure, directory, "risk_return")
 
 
-def _seconds_rows(ax, rows: Sequence[tuple[str, str, float, float, float]]) -> None:
-    """One row per (label, color, mean, low, high), top to bottom, on a log axis of seconds.
-
-    Each row is a dot at its mean and a line across its interval, labeled with
-    the mean right of the interval.
-    """
-    ax.grid(axis="y", visible=False)
-    ax.grid(axis="x", color=GRID, linewidth=1)
-    for position, (_, color, mean, low, high) in enumerate(rows):
-        ax.hlines(position, low, high, color=color, linewidth=LINE_WIDTH)
-        ax.scatter(
-            [mean],
-            [position],
-            s=INTERVAL_MARKER_AREA,
-            facecolor=color,
-            edgecolor=SURFACE,
-            linewidth=MARKER_EDGE,
-            zorder=3,
-        )
-        ax.annotate(
-            _duration(mean),
-            xy=(high, position),
-            xytext=(6, 0),
-            textcoords="offset points",
-            va="center",
-            color=INK_SECONDARY,
-            fontsize=TEXT_SIZE,
-        )
-    ax.set_xscale("log")
-    ax.xaxis.set_major_locator(LogLocator(subs=SECONDS_TICK_STEPS))
-    ax.xaxis.set_major_formatter(StrMethodFormatter("{x:g}"))
-    ax.xaxis.set_minor_locator(NullLocator())
-    ax.set_yticks(range(len(rows)), [row[0] for row in rows])
-    ax.set_ylim(len(rows) - 0.4, -0.6)
-    ax.set_xlim(
-        min(row[3] for row in rows) / SECONDS_LEFT_ROOM,
-        max(row[4] for row in rows) * SECONDS_RIGHT_ROOM,
-    )
-    ax.set_xlabel("seconds per call (log)", color=INK_SECONDARY, fontsize=TEXT_SIZE)
-
-
-def plot_runtime(
-    table: pd.DataFrame, styles: Sequence[BlogStyle], directory: Path
-) -> list[Path]:
-    """Each simulator's mean seconds per scenario-generation call (``runtime_table``)."""
-    figure, axes = _figure(8, 0.7 * len(styles) + 2.6)
-    ax = axes[0, 0]
-    rows = table.set_index("arm")
-    _seconds_rows(
-        ax,
-        [
-            (
-                f"{style.inline_label} on {style.device}",
-                style.color,
-                *rows.loc[style.name, ["mean_seconds", "ci_low", "ci_high"]],
-            )
-            for style in styles
-        ],
-    )
-    first = table.iloc[0]
-    _panel_title(
-        ax,
-        "Seconds per scenario-generation call",
-        f"mean over {int(first['trials'])} trials with its 95 % interval;"
-        " calls without warm-up",
-    )
-    figure.supxlabel(
-        f"A call generates {int(first['num_scen']):,} scenarios of "
-        f"{int(first['assets'])} assets at every horizon up to "
-        f"{int(first['longest_horizon'])} trading days:\none request for "
-        "JointFM, a next-day call plus one one-day draw per day for the others.",
-        color=MUTED,
-        fontsize=SUBTITLE_SIZE,
-    )
-    _headline(figure, "Scenario generation: seconds per call")
-    _style_text(figure)
-    return _save(figure, directory, "runtime")
-
-
-def plot_device_runtime(
-    table: pd.DataFrame, styles: Sequence[BlogStyle], directory: Path
-) -> list[Path]:
-    """JointFM's mean seconds per next-day request per device (``device_runtime_table``).
-
-    The GPU row's label carries the CPU-to-GPU ratio with its interval.
-    """
-    figure, axes = _figure(8, 3.6)
-    ax = axes[0, 0]
-    jointfm = next(style for style in styles if style.fit_type == "jointfm")
-    seconds = table[table["reading"] == "seconds"].set_index("device")
-    ratio = table[table["reading"] == DEVICE_RATIO].iloc[0]
-    labels = {
-        "CPU": f"{jointfm.inline_label} on CPU",
-        "GPU": f"{jointfm.inline_label} on GPU\nCPU ÷ GPU {ratio['estimate']:.1f}× "
-        f"({ratio['ci_low']:.1f}–{ratio['ci_high']:.1f})",
-    }
-    _seconds_rows(
-        ax,
-        [
-            (
-                labels[device],
-                jointfm.color,
-                *seconds.loc[device, ["estimate", "ci_low", "ci_high"]],
-            )
-            for device in DEVICE_ORDER
-        ],
-    )
-    _panel_title(
-        ax,
-        f"{jointfm.inline_label} seconds per next-day request",
-        f"mean over {int(seconds['trials'].iloc[0])} trials with its 95 % interval;"
-        " requests without warm-up",
-    )
-    figure.supxlabel(
-        f"A request asks for {int(ratio['num_scen']):,} joint scenarios of "
-        f"{int(ratio['assets'])} assets, timed with the HTTP round trip to the "
-        "service.\nThe ratio is the median over trials of CPU seconds over GPU "
-        "seconds, with its 95 % interval.",
-        color=MUTED,
-        fontsize=SUBTITLE_SIZE,
-    )
-    _headline(figure, f"{jointfm.inline_label} on CPU and GPU: seconds per request")
-    _style_text(figure)
-    return _save(figure, directory, "runtime_devices")
-
-
 def plot_performance(
     performance: pd.DataFrame, styles: Sequence[BlogStyle], directory: Path
 ) -> list[Path]:
@@ -1211,57 +910,82 @@ def plot_performance(
 def plot_universe_sizes(
     table: pd.DataFrame, styles: Sequence[BlogStyle], directory: Path
 ) -> list[Path]:
-    """Mean total return and mean maximum drawdown over the universe sizes, one line per simulator.
+    """Mean total return over the universe sizes, ``FOCUS_FIT_TYPE`` against the others.
 
     Only the means are drawn: the trading windows' market moves spread every
     simulator's level alike, so intervals of the levels overlap even where the
-    paired differences of the CSV are clear. The drawdown is drawn below zero,
-    so in both panels a higher line is better.
+    paired differences of the CSV are clear. The other simulators are drawn
+    thin over the band between their lowest and highest mean, so they read as
+    one group against the simulator the post is about.
+
+    Raises
+    ------
+    ValueError
+        If ``styles`` holds no ``FOCUS_FIT_TYPE`` simulator.
     """
-    figure, axes = _figure(12, 5.5, cols=len(UNIVERSE_SIZE_METRICS))
-    sizes = np.sort(table["size"].unique())
-    for ax, metric, sign in zip(axes[0], UNIVERSE_SIZE_METRICS, (1, -1)):
-        labels = []
-        for style in styles:
-            rows = table[(table["metric"] == metric) & (table["arm"] == style.name)]
-            rows = rows.sort_values("size")
-            values = sign * PERCENT * rows["mean"].to_numpy()
-            ax.plot(
-                rows["size"].to_numpy(),
-                values,
-                color=style.color,
-                linewidth=LINE_WIDTH,
-                marker="o",
-                markersize=5,
-                markeredgecolor=SURFACE,
-                zorder=3,
-            )
-            labels.append(
-                (sizes[-1], values[-1], f"{style.inline_label} {values[-1]:+.1f} %")
-            )
-        ax.set_xticks(sizes)
-        ax.set_xlim(sizes[0], sizes[-1] + (sizes[-1] - sizes[0]) * 0.3)
-        _end_labels(ax, labels)
-    trials = int(table["trials"].iloc[0])
-    _axis_labels(axes[0, 0], "assets in the universe", "total return (%)")
-    _panel_title(
-        axes[0, 0],
-        "Total return over the backtest",
-        f"mean over {trials} trials, each trading nested subsets of its assets",
+    focus = [style for style in styles if style.fit_type == FOCUS_FIT_TYPE]
+    if len(focus) != 1:
+        raise ValueError(
+            f"The universe-size figure draws one {FOCUS_FIT_TYPE} simulator "
+            f"against the others; the results hold {len(focus)}."
+        )
+    group = [style for style in styles if style.fit_type != FOCUS_FIT_TYPE]
+    metric = UNIVERSE_SIZE_METRICS[0]
+    levels = table[(table["reading"] == SIZE_READING) & (table["metric"] == metric)]
+    means = PERCENT * levels.pivot(index="size", columns="arm", values="mean")
+    means = means.sort_index()
+    sizes = means.index.to_numpy(dtype=float)
+    figure, axes = _figure(10, 5.5)
+    ax = axes[0, 0]
+    names = [style.name for style in group]
+    ax.fill_between(
+        sizes,
+        means[names].min(axis=1),
+        means[names].max(axis=1),
+        color=MUTED,
+        alpha=GROUP_SHADE,
+        linewidth=0,
     )
-    _axis_labels(axes[0, 1], "assets in the universe", "maximum drawdown (%)")
+    for style in group:
+        ax.plot(sizes, means[style.name], color=style.color, linewidth=GROUP_LINE_WIDTH)
+    ax.plot(
+        sizes,
+        means[focus[0].name],
+        color=focus[0].color,
+        linewidth=FOCUS_LINE_WIDTH,
+        marker="o",
+        markersize=6,
+        markeredgecolor=SURFACE,
+        zorder=3,
+    )
+    ax.set_xticks(sizes, [f"{size:.0f}" for size in sizes])
+    ax.set_xlim(sizes[0], sizes[-1] + (sizes[-1] - sizes[0]) * 0.3)
+    last = means.iloc[-1]
+    _end_labels(
+        ax,
+        [
+            (
+                sizes[-1],
+                last[style.name],
+                f"{style.inline_label} {last[style.name]:+.1f} %",
+            )
+            for style in styles
+        ],
+    )
+    trials = int(levels["trials"].iloc[0])
+    _axis_labels(ax, "assets in the universe", "total return (%)")
     _panel_title(
-        axes[0, 1],
-        "Maximum drawdown from the running peak",
-        f"mean over {trials} trials of the deepest daily fall below the peak",
+        ax,
+        "Total return over the backtest",
+        f"mean over {trials} trials, each trading nested subsets of its assets "
+        f"over one window",
     )
     _headline(figure, "Rebalanced portfolio by number of assets")
-    _legend(figure, styles, lines=True, reference=None)
     _style_text(figure)
     return _save(figure, directory, "universe_sizes")
 
 
-def write_blog(config: ExperimentConfig, timing_results: Path) -> ReportOutputs:
+def write_blog(config: ExperimentConfig, devices_results: Path) -> ReportOutputs:
     """Compute the blog's readings from a configuration's results and write its figures.
 
     The scenario figures read ``config.output`` and the price file it was
@@ -1270,22 +994,23 @@ def write_blog(config: ExperimentConfig, timing_results: Path) -> ReportOutputs:
     the trials in which every arm finished, and the risk-free rate file the
     backtests' cash earned; the universe-size figure reads
     ``config.universe_sizes.output``, over the trials in which every arm
-    finished at every size. The device figure reads ``timing_results``, the
-    results of a timing configuration (``device_runtime_table``). Everything
-    goes to ``config.blog_dir``.
+    finished at every size. The speed figures read ``devices_results``, the
+    results of a CPU-against-GPU configuration (``devices_report``).
+    Everything goes to ``config.blog_dir``.
 
     Raises
     ------
+    FileNotFoundError
+        If ``devices_results`` does not exist.
     ValueError
         If the scenario results hold no scenario or portfolio scores, either
         results file was measured on another price file, the rebalancing
         results earned cash at another risk-free rate file, the scenario
-        results lack ``REFERENCE_ARM``, have too few complete trials or a
-        volatility tercile with too few trials, the rebalancing results
-        have too few complete trials, the universe-size results are missing,
-        were measured on another price or rate file, or have too few trials
-        complete at every size, or ``timing_results`` holds a horizon
-        other than the next day or lacks JointFM on either device.
+        results lack ``REFERENCE_ARM`` or have too few complete trials, the
+        rebalancing results have too few complete trials, the universe-size
+        results are missing, were measured on another price or rate file, or
+        have too few trials complete at every size, or ``devices_results``
+        lacks a session or a trial both sessions finished.
     """
     frame, metadata = read_results(config.output)
     identity = metadata.identity
@@ -1304,11 +1029,6 @@ def write_blog(config: ExperimentConfig, timing_results: Path) -> ReportOutputs:
     }
     styles = blog_styles(per_trial[NEXT_DAY])
     prices = load_prices(config.prices)
-    features = origin_features(prices, frame, experiment)
-    regimes, bounds = terciles(features)
-    readings = regime_readings(
-        frame[frame["horizon"] == NEXT_DAY], regimes, ("summary",)
-    )
 
     runs, run_metadata = read_results(config.rebalancing.output)
     check_prices(config.prices, run_metadata.identity)
@@ -1336,14 +1056,12 @@ def write_blog(config: ExperimentConfig, timing_results: Path) -> ReportOutputs:
     tables = {
         "ranking": ranking_table(per_trial[NEXT_DAY], styles),
         "skill_horizons": skill_table(per_trial, styles),
-        "volatility_regimes": regime_table(readings["summary"], bounds, styles),
         "growth": growth_table(runs, run_styles, step_days),
         "risk_return": risk_return_table(performance, run_styles, cash),
         "performance": performance,
         "universe_sizes": universe_size_table(sized_runs, sized_styles, sweep.sizes),
-        "runtime": runtime_table(per_trial[NEXT_DAY], styles, experiment),
-        "runtime_devices": device_runtime_table(timing_results),
     }
+    speed = device_tables(devices_results)
     directory = config.blog_dir
     directory.mkdir(parents=True, exist_ok=True)
     files = []
@@ -1353,13 +1071,11 @@ def write_blog(config: ExperimentConfig, timing_results: Path) -> ReportOutputs:
         files.append(path)
     files += plot_ranking(tables["ranking"], styles, directory)
     files += plot_skill_horizons(tables["skill_horizons"], styles, directory)
-    files += plot_volatility_regimes(tables["volatility_regimes"], styles, directory)
     files += plot_growth(tables["growth"], run_styles, directory)
     files += plot_risk_return(tables["risk_return"], run_styles, directory)
     files += plot_performance(tables["performance"], run_styles, directory)
     files += plot_universe_sizes(tables["universe_sizes"], sized_styles, directory)
-    files += plot_runtime(tables["runtime"], styles, directory)
-    files += plot_device_runtime(tables["runtime_devices"], styles, directory)
+    files += write_device_figures(speed, directory)
     return ReportOutputs(files=files, excluded_trials=excluded)
 
 
@@ -1373,11 +1089,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", type=Path, required=True, help="YAML configuration file."
     )
     parser.add_argument(
-        "--timing-config",
+        "--devices-config",
         type=Path,
         required=True,
-        help="YAML configuration of the JointFM CPU-against-GPU timing "
-        "(task experiments:timing), whose results the device figure reads.",
+        help="YAML configuration of the CPU-against-GPU experiment "
+        "(task experiments:devices), whose results the speed figures read.",
     )
     return parser
 
@@ -1385,7 +1101,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = load_config(args.config)
-    outputs = write_blog(config, load_config(args.timing_config).output)
+    devices, _ = load_devices_config(args.devices_config)
+    outputs = write_blog(config, devices.output)
     if outputs.excluded_trials:
         print(
             f"Left out {len(outputs.excluded_trials)} incomplete scenario trials: "

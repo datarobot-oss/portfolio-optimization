@@ -18,6 +18,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .arms import (
+    ARMS,
     CONFIG_ARM_NAMES,
     HISTORICAL_MEAN_ARM,
     INDEPENDENT_ARM,
@@ -26,6 +27,19 @@ from .arms import (
     WINDOW_ARM,
     check_donors,
 )
+from .solvers import SOLVER_NAMES, SOLVERS_BY_NAME
+
+# Simulators a CPU-against-GPU experiment times besides its JointFM pipeline.
+DEVICE_GENERATOR_NAMES = tuple(arm.name for arm in ARMS if arm.fit_type != "jointfm")
+
+
+def _known_solvers(solvers: tuple[str, ...]) -> tuple[str, ...]:
+    unknown = [solver for solver in solvers if solver not in SOLVERS_BY_NAME]
+    if unknown:
+        raise ValueError(
+            f"Unknown solvers {unknown}; choose from {list(SOLVER_NAMES)}."
+        )
+    return solvers
 
 
 def _known_unique_arms(arms: tuple[str, ...]) -> tuple[str, ...]:
@@ -141,9 +155,10 @@ class RebalancingConfig(BaseModel):
         "and the Sharpe and Sortino ratios subtract them; each period earns the "
         "rate quoted before it ends, compounded over 252 trading days a year."
     )
-    solver: Literal["CUOPT", "CLARABEL"] = Field(
-        description="CVXPY solver of every optimization: CUOPT (GPU, PDLP) for runs, "
-        "CLARABEL (CPU) for hosts without cuOpt."
+    solver: str = Field(
+        description=f"Solver of every optimization, one of {', '.join(SOLVER_NAMES)} "
+        f"(solvers.py): CUOPT (cuOpt PDLP on the GPU) for runs, a CPU solver such "
+        f"as CLARABEL for hosts without cuOpt."
     )
     cvar: CvarConfig = Field(description="CVaR optimization constraints.")
 
@@ -151,6 +166,11 @@ class RebalancingConfig(BaseModel):
     @classmethod
     def known_unique_arms(cls, arms: tuple[str, ...]) -> tuple[str, ...]:
         return _known_unique_arms(arms)
+
+    @field_validator("solver")
+    @classmethod
+    def known_solver(cls, solver: str) -> str:
+        return _known_solvers((solver,))[0]
 
     @model_validator(mode="after")
     def whole_steps(self) -> "RebalancingConfig":
@@ -411,6 +431,149 @@ class ExperimentConfig(BaseModel):
         return self.output.with_name(f"{self.output.stem}_blog")
 
 
+class DevicesConfig(BaseModel):
+    """CPU-against-GPU experiment: rebalancing decisions on each device, stage by stage.
+
+    The decisions are those of the rebalancing backtest that ``experiment``
+    configures: its trials' universes and trading windows, its prices, cash
+    rates, trigger, and CVaR constraints. One session per device runs them
+    (``devices.py``) with JointFM on that device's service and that device's
+    solver.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    experiment: Path = Field(
+        description="Simulator-comparison configuration whose rebalancing backtest "
+        "the decisions come from: trial i trades its trial i's universe over its "
+        "trading window, re-optimized by its trigger under its CVaR constraints, "
+        "on its prices and cash rates. Its outputs are not read."
+    )
+    output: Path = Field(
+        description="Results Parquet file, one row per decision, generation call, "
+        "and solve; resumed per session and trial, and refused when measured "
+        "under other conditions. Its report goes to <output stem>_report."
+    )
+    trials: int = Field(
+        gt=0,
+        description="Trials 0 .. trials - 1 of the experiment's rebalancing "
+        "backtest run, every decision of each; at most its rebalancing.trials.",
+    )
+    num_scen: int = Field(
+        gt=0,
+        description="Scenarios per decision: every JointFM request of the "
+        "pipelines and every timed generator call asks for this many.",
+    )
+    gpu_solver: str = Field(
+        description="Solver of the GPU pipeline, a GPU solver of solvers.py; it "
+        "runs on the GPU the GPU session's JointFM service runs on."
+    )
+    cpu_solver: str = Field(
+        description="Solver of the CPU pipeline, a CPU solver of solvers.py that "
+        "loads without a GPU, since the CPU session hides every GPU. Set it to "
+        "the fastest CPU solver of paired_solvers that a pilot measured."
+    )
+    paired_solvers: tuple[str, ...] = Field(
+        min_length=2,
+        description="Solvers the GPU session runs on every decision's identical "
+        "problem after its backtest, in this order: each rebuilds the problem "
+        "from the decision's scenarios, expected returns, and previous portfolio, "
+        "and is timed for setup and solve, with its objective and weights kept. "
+        "Must list gpu_solver and cpu_solver.",
+    )
+    sweep_num_scen: tuple[int, ...] = Field(
+        min_length=1,
+        description="Scenario counts of the solver sweep, strictly increasing and "
+        "without num_scen, whose solves the paired solvers already give. At each "
+        "count the GPU session draws JointFM scenarios on the GPU for the first "
+        "sweep_decisions decisions of every trial and runs every paired solver on "
+        "them.",
+    )
+    sweep_decisions: int = Field(
+        gt=0,
+        description="Decisions per trial, the first ones, that the solver sweep "
+        "runs at every count of sweep_num_scen.",
+    )
+    generators: tuple[str, ...] = Field(
+        description=f"Simulators besides JointFM, from {', '.join(DEVICE_GENERATOR_NAMES)}, "
+        f"timed at every decision on the decision's look-back window: each in the "
+        f"session of its own device, so a GPU simulator in the GPU session and a "
+        f"CPU simulator in the CPU session."
+    )
+
+    @field_validator("gpu_solver", "cpu_solver")
+    @classmethod
+    def known_pipeline_solver(cls, solver: str) -> str:
+        return _known_solvers((solver,))[0]
+
+    @field_validator("paired_solvers")
+    @classmethod
+    def known_unique_solvers(cls, solvers: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(solvers)) != len(solvers):
+            raise ValueError("Each paired solver may run only once.")
+        return _known_solvers(solvers)
+
+    @field_validator("generators")
+    @classmethod
+    def known_unique_generators(cls, generators: tuple[str, ...]) -> tuple[str, ...]:
+        unknown = [name for name in generators if name not in DEVICE_GENERATOR_NAMES]
+        if unknown:
+            raise ValueError(
+                f"Unknown generators {unknown}; choose from "
+                f"{list(DEVICE_GENERATOR_NAMES)}."
+            )
+        if len(set(generators)) != len(generators):
+            raise ValueError("Each generator may run only once.")
+        return generators
+
+    @field_validator("sweep_num_scen")
+    @classmethod
+    def increasing_counts(cls, counts: tuple[int, ...]) -> tuple[int, ...]:
+        if counts[0] < 1 or any(b <= a for a, b in zip(counts, counts[1:])):
+            raise ValueError(
+                f"sweep_num_scen {list(counts)} must be positive and strictly "
+                f"increasing."
+            )
+        return counts
+
+    @model_validator(mode="after")
+    def pipelines_fit_their_devices(self) -> "DevicesConfig":
+        gpu, cpu = SOLVERS_BY_NAME[self.gpu_solver], SOLVERS_BY_NAME[self.cpu_solver]
+        if gpu.device != "GPU":
+            raise ValueError(f"gpu_solver {gpu.name} computes on the {gpu.device}.")
+        if cpu.device != "CPU" or cpu.needs_gpu:
+            raise ValueError(
+                f"cpu_solver {cpu.name} must compute on the CPU and load without a "
+                f"GPU, since the CPU session hides every GPU."
+            )
+        missing = [
+            name
+            for name in (self.gpu_solver, self.cpu_solver)
+            if name not in self.paired_solvers
+        ]
+        if missing:
+            raise ValueError(
+                f"paired_solvers must list the pipelines' solvers {missing}, so "
+                f"the two are compared on identical problems."
+            )
+        if self.num_scen in self.sweep_num_scen:
+            raise ValueError(
+                f"sweep_num_scen {list(self.sweep_num_scen)} must leave out num_scen "
+                f"{self.num_scen}, whose solves the paired solvers already give."
+            )
+        return self
+
+    @property
+    def report_dir(self) -> Path:
+        """Where the report writes: ``<output stem>_report`` beside the results."""
+        return self.output.with_name(f"{self.output.stem}_report")
+
+    @property
+    def universe_dir(self) -> Path:
+        """Per-trial price CSVs, which rebalance_portfolio reads by path."""
+        return self.output.with_name(f"{self.output.stem}_universes")
+
+
 def load_config(path: Path) -> ExperimentConfig:
     """Read and validate a YAML configuration file.
 
@@ -421,3 +584,25 @@ def load_config(path: Path) -> ExperimentConfig:
     """
     with open(path) as handle:
         return ExperimentConfig.model_validate(yaml.safe_load(handle))
+
+
+def load_devices_config(path: Path) -> tuple[DevicesConfig, ExperimentConfig]:
+    """Read a CPU-against-GPU configuration and the experiment its decisions come from.
+
+    Raises
+    ------
+    pydantic.ValidationError
+        If a field of either file is missing, unknown, or invalid.
+    ValueError
+        If it asks for more trials than the experiment's rebalancing backtest
+        runs, whose decisions it measures.
+    """
+    with open(path) as handle:
+        devices = DevicesConfig.model_validate(yaml.safe_load(handle))
+    experiment = load_config(devices.experiment)
+    if devices.trials > experiment.rebalancing.trials:
+        raise ValueError(
+            f"{path} asks for {devices.trials} trials, but {devices.experiment}'s "
+            f"rebalancing backtest runs {experiment.rebalancing.trials}."
+        )
+    return devices, experiment
