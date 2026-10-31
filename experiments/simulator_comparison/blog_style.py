@@ -42,8 +42,10 @@ TITLE_PAD = 22
 # label, as factors on a log axis of seconds.
 SECONDS_LEFT_ROOM = 1.5
 SECONDS_RIGHT_ROOM = 4.0
-# Labeled steps within each decade of a log axis of seconds.
+# Labeled steps within each decade of a log axis of seconds: 1-2-5 for an
+# axis of a few decades, whole decades only for one that spans many.
 SECONDS_TICK_STEPS = (1.0, 2.0, 5.0)
+DECADE_TICK_STEPS = (1.0,)
 
 
 def _style_text(figure) -> None:
@@ -78,12 +80,16 @@ def _footnote(figure, text: str) -> None:
 
 
 def _seconds_rows(
-    ax, rows: Sequence[tuple[str, str, float, float, float]], unit: str
+    ax,
+    rows: Sequence[tuple[str, str, float, float, float]],
+    unit: str,
+    tick_steps: Sequence[float],
 ) -> None:
     """One row per (label, color, mean, low, high), top to bottom, on a log axis of seconds.
 
     Each row is a dot at its mean and a line across its interval, labeled with
-    the mean right of the interval; the axis counts seconds per ``unit``.
+    the mean right of the interval; the axis counts seconds per ``unit`` and
+    labels ``tick_steps`` within each decade.
     """
     ax.grid(axis="y", visible=False)
     ax.grid(axis="x", color=GRID, linewidth=1)
@@ -108,7 +114,7 @@ def _seconds_rows(
             fontsize=TEXT_SIZE,
         )
     ax.set_xscale("log")
-    ax.xaxis.set_major_locator(LogLocator(subs=SECONDS_TICK_STEPS))
+    ax.xaxis.set_major_locator(LogLocator(subs=tick_steps))
     ax.xaxis.set_major_formatter(StrMethodFormatter("{x:g}"))
     ax.xaxis.set_minor_locator(NullLocator())
     ax.set_yticks(range(len(rows)), [row[0] for row in rows])

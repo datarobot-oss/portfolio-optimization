@@ -39,6 +39,9 @@ from .analysis import BOOTSTRAP_SEED, bootstrap_interval
 from .arms import ARMS_BY_NAME
 from .blog_style import (
     BLOG_NAMES,
+    DECADE_TICK_STEPS,
+    SECONDS_TICK_STEPS,
+    TEXT_SIZE,
     _footnote,
     _headline,
     _panel_title,
@@ -48,13 +51,19 @@ from .blog_style import (
 from .config import load_devices_config
 from .devices import DEVICES
 from .plotting import (
+    AXIS,
     DEVICE_ORDER,
     INK,
+    INK_SECONDARY,
+    LINE_WIDTH,
+    MARKER_EDGE,
     SIMULATOR_COLORS,
     SIMULATOR_ORDER,
+    SURFACE,
     _figure,
     _save,
 )
+from .report import _duration
 from .solvers import SOLVERS_BY_NAME
 from .table import read_results
 
@@ -64,6 +73,16 @@ STAGES = {
     "optimizer_seconds": "Optimizer",
     "seconds": "Decision",
 }
+# The stages a decision's bar stacks, bottom to top; they sum to "seconds".
+STACKED_STAGES = ("generation_seconds", "optimizer_seconds")
+# Bar width and room right of the last bar for its labels, in bar positions.
+STACK_BAR_WIDTH = 0.5
+STACK_RIGHT_ROOM = 1.3
+STACK_LABEL_OFFSET = 0.08
+# Room above the slowest total's interval, and the least distance between two
+# labels of one bar, as factors of the axis height.
+STACK_TOP_ROOM = 1.06
+STACK_LABEL_SPACING = 0.13
 # The reading of runtime_devices.csv that holds the CPU-to-GPU time ratio.
 DEVICE_RATIO = "cpu_over_gpu"
 # Slots of the reference palette (plotting.SIMULATOR_COLORS): JointFM's blue
@@ -314,7 +333,10 @@ def device_tables(results: Path) -> dict[str, pd.DataFrame]:
 
 
 def plot_runtime(table: pd.DataFrame, directory: Path) -> list[Path]:
-    """Each simulator's mean seconds per scenario-generation call per device (``runtime_table``)."""
+    """Each simulator's mean seconds per scenario-generation call per device (``runtime_table``).
+
+    The calls span several decades, so only whole decades are labeled.
+    """
     figure, axes = _figure(8, 0.7 * len(table) + 2.8)
     ax = axes[0, 0]
     _seconds_rows(
@@ -330,6 +352,7 @@ def plot_runtime(table: pd.DataFrame, directory: Path) -> list[Path]:
             for row in table.itertuples()
         ],
         "call",
+        DECADE_TICK_STEPS,
     )
     jointfm = table[table["fit_type"] == "jointfm"].iloc[0]
     _panel_title(
@@ -350,43 +373,105 @@ def plot_runtime(table: pd.DataFrame, directory: Path) -> list[Path]:
     return _save(figure, directory, "runtime")
 
 
+def _ratio_text(ratio: pd.Series) -> str:
+    return (
+        f"CPU ÷ GPU {ratio['estimate']:.1f}× "
+        f"({ratio['ci_low']:.1f}–{ratio['ci_high']:.1f})"
+    )
+
+
+def _spread_labels(midpoints: Sequence[float], spacing: float) -> list[float]:
+    """Label heights at the segment midpoints, raised bottom-up to keep ``spacing`` apart and above the baseline."""
+    heights = []
+    floor = spacing / 2
+    for midpoint in midpoints:
+        heights.append(max(midpoint, floor))
+        floor = heights[-1] + spacing
+    return heights
+
+
 def plot_stages(table: pd.DataFrame, directory: Path) -> list[Path]:
-    """A decision's stages per device, the GPU rows labeled with the CPU-to-GPU ratio (``stage_table``)."""
+    """One bar per device stacking a decision's scenarios and optimizer seconds (``stage_table``).
+
+    The bars share one linear axis, since stacked segments add up only on a
+    linear scale. Each segment is labeled right of its bar, the GPU's with the
+    stage's CPU-to-GPU ratio; a label that does not fit at its segment's
+    midpoint is raised and joined to it by a leader line. The device's tick
+    label carries the decision's total, the GPU's also its ratio, and a
+    whisker on each bar spans the total's interval.
+    """
     figure, axes = _figure(8, 6.2)
     ax = axes[0, 0]
     seconds = table[table["reading"] == "seconds"].set_index(["stage", "device"])
     ratios = table[table["reading"] == DEVICE_RATIO].set_index("stage")
-    rows = []
-    for stage, stage_name in STAGES.items():
-        for device in DEVICE_ORDER:
+    total = seconds.loc["seconds"]
+    top = total["ci_high"].max() * STACK_TOP_ROOM
+    tick_labels = []
+    for position, device in enumerate(DEVICE_ORDER):
+        bottom = 0.0
+        midpoints, texts = [], []
+        for stage in STACKED_STAGES:
             row = seconds.loc[(stage, device)]
-            label = f"{stage_name} on {device}"
-            if stage == "optimizer_seconds":
-                label = (
-                    f"{stage_name} ({SOLVERS_BY_NAME[row['solver']].label}) on {device}"
-                )
-            if device == "GPU":
-                ratio = ratios.loc[stage]
-                label += (
-                    f"\nCPU ÷ GPU {ratio['estimate']:.1f}× "
-                    f"({ratio['ci_low']:.1f}–{ratio['ci_high']:.1f})"
-                )
-            rows.append(
-                (
-                    label,
-                    STAGE_COLORS[stage],
-                    row["estimate"],
-                    row["ci_low"],
-                    row["ci_high"],
-                )
+            ax.bar(
+                position,
+                row["estimate"],
+                STACK_BAR_WIDTH,
+                bottom=bottom,
+                color=STAGE_COLORS[stage],
+                edgecolor=SURFACE,
+                linewidth=MARKER_EDGE,
             )
-    _seconds_rows(ax, rows, "decision")
+            name = STAGES[stage]
+            if stage == "optimizer_seconds":
+                name += f" ({SOLVERS_BY_NAME[row['solver']].label})"
+            text = f"{name}: {_duration(row['estimate'])}"
+            if device == "GPU":
+                text += f"\n{_ratio_text(ratios.loc[stage])}"
+            midpoints.append(bottom + row["estimate"] / 2)
+            texts.append(text)
+            bottom += row["estimate"]
+        edge = position + STACK_BAR_WIDTH / 2
+        heights = _spread_labels(midpoints, STACK_LABEL_SPACING * top)
+        for midpoint, height, text in zip(midpoints, heights, texts):
+            moved = not np.isclose(midpoint, height)
+            ax.annotate(
+                text,
+                xy=(edge, midpoint),
+                xytext=(edge + STACK_LABEL_OFFSET, height),
+                va="center",
+                color=INK_SECONDARY,
+                fontsize=TEXT_SIZE,
+                arrowprops={
+                    "arrowstyle": "-",
+                    "color": AXIS,
+                    "linewidth": 1,
+                    "relpos": (0, 0.5),
+                }
+                if moved
+                else None,
+            )
+        ax.vlines(
+            position,
+            total.loc[device, "ci_low"],
+            total.loc[device, "ci_high"],
+            color=INK,
+            linewidth=LINE_WIDTH,
+        )
+        label = f"{device}\n{_duration(total.loc[device, 'estimate'])} per decision"
+        if device == "GPU":
+            label += f"\n{_ratio_text(ratios.loc['seconds'])}"
+        tick_labels.append(label)
+    ax.grid(axis="x", visible=False)
+    ax.set_xticks(range(len(DEVICE_ORDER)), tick_labels)
+    ax.set_xlim(-STACK_BAR_WIDTH, len(DEVICE_ORDER) - 1 + STACK_RIGHT_ROOM)
+    ax.set_ylim(0, top)
+    ax.set_ylabel("seconds per decision", color=INK_SECONDARY, fontsize=TEXT_SIZE)
     first = table.iloc[0]
     _panel_title(
         ax,
         "Seconds per rebalancing decision, by stage",
-        f"mean over {int(seconds['trials'].min())} trials with its 95 % interval;"
-        " decisions without warm-up",
+        f"mean over {int(seconds['trials'].min())} trials; the whisker spans the "
+        "total's 95 % interval; decisions without warm-up",
     )
     _footnote(
         figure,
@@ -394,7 +479,7 @@ def plot_stages(table: pd.DataFrame, directory: Path) -> list[Path]:
         f"{int(first['assets'])} assets and solves the Mean-CVaR problem on them;\n"
         "the scenarios include the HTTP round trip to JointFM's local service, the "
         "optimizer the problem's setup and solve.\nThe ratio is the median over "
-        f"trials of CPU seconds over GPU seconds. {_hardware_text(table)}",
+        f"trials of CPU seconds over GPU seconds.\n{_hardware_text(table)}",
     )
     _headline(figure, "A rebalancing decision on CPU and GPU")
     _style_text(figure)
@@ -417,7 +502,7 @@ def plot_solvers(table: pd.DataFrame, directory: Path) -> list[Path]:
         rows.append(
             (label, SOLVER_COLORS[row.solver], row.estimate, row.ci_low, row.ci_high)
         )
-    _seconds_rows(ax, rows, "solve")
+    _seconds_rows(ax, rows, "solve", SECONDS_TICK_STEPS)
     first = table.iloc[0]
     _panel_title(
         ax,
