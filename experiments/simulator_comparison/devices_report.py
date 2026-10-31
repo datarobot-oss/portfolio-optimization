@@ -83,6 +83,8 @@ STACK_LABEL_OFFSET = 0.08
 # labels of one bar, as factors of the axis height.
 STACK_TOP_ROOM = 1.06
 STACK_LABEL_SPACING = 0.13
+# Inches per row of the runtime and solvers figures.
+SECONDS_ROW_HEIGHT = 0.4
 # The reading of runtime_devices.csv that holds the CPU-to-GPU time ratio.
 DEVICE_RATIO = "cpu_over_gpu"
 # Slots of the reference palette (plotting.SIMULATOR_COLORS): JointFM's blue
@@ -337,7 +339,7 @@ def plot_runtime(table: pd.DataFrame, directory: Path) -> list[Path]:
 
     The calls span several decades, so only whole decades are labeled.
     """
-    figure, axes = _figure(8, 0.7 * len(table) + 2.8)
+    figure, axes = _figure(8, SECONDS_ROW_HEIGHT * len(table) + 2.8)
     ax = axes[0, 0]
     _seconds_rows(
         ax,
@@ -488,7 +490,7 @@ def plot_stages(table: pd.DataFrame, directory: Path) -> list[Path]:
 
 def plot_solvers(table: pd.DataFrame, directory: Path) -> list[Path]:
     """Each paired solver's mean seconds per solve, labeled with its time over the GPU solver's."""
-    figure, axes = _figure(8, 0.75 * len(table) + 2.8)
+    figure, axes = _figure(8, SECONDS_ROW_HEIGHT * len(table) + 2.8)
     ax = axes[0, 0]
     reference = SOLVERS_BY_NAME[table["reference"].iloc[0]].label
     rows = []
