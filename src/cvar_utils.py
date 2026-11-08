@@ -4,7 +4,6 @@
 
 import os
 import time
-from collections.abc import Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -12,12 +11,11 @@ import pandas as pd
 import seaborn as sns
 import sklearn.neighbors
 
-from . import scenario_generation, utils
+from . import scenario_generation, scenario_generators, utils
 from .cvar_data import CvarData
 from .cvar_parameters import CvarParameters
 from .portfolio import Portfolio
 from .settings import (
-    JointFMSettings,
     KDESettings,
     ReturnsComputeSettings,
     ScenarioGenerationSettings,
@@ -26,8 +24,7 @@ from .settings import (
 FRONTIER_RISK_TOLERANCE = 1e-12
 
 # Note: cvar_optimizer and cuml are imported lazily within functions to avoid
-# circular imports and loading CUDA libraries at module import time;
-# jointfm_client is imported lazily because it is an optional extra
+# circular imports and loading CUDA libraries at module import time
 
 
 def generate_samples_kde(
@@ -122,268 +119,6 @@ def generate_samples_kde(
     return new_samples_df.to_numpy()
 
 
-JOINTFM_INSTALL_HINT = (
-    "fit_type='jointfm' requires the optional 'jointfm' extra: install it with "
-    "`uv sync --extra jointfm` or `pip install 'portfolio-optimization[jointfm]'`."
-)
-
-
-def _import_jointfm_client():
-    """Import the ``jointfm_client`` SDK, which only fit_type='jointfm' needs.
-
-    Returns
-    -------
-    module
-        The imported ``jointfm_client`` package.
-
-    Raises
-    ------
-    ImportError
-        If the 'jointfm' extra is not installed; the message says how to
-        install it.
-    """
-    try:
-        import jointfm_client
-    except ImportError as exc:
-        raise ImportError(JOINTFM_INSTALL_HINT) from exc
-    return jointfm_client
-
-
-JOINTFM_RETURN_TYPES = ("LOG", "LINEAR")
-
-
-def generate_samples_jointfm(
-    num_scen: int,
-    returns_data: pd.DataFrame,
-    return_type: str,
-    freq: int,
-    jointfm_settings: JointFMSettings,
-    seed: int = None,
-):
-    """Sample joint next-period return scenarios from a JointFM model.
-
-    Each scenario is one joint draw of the row that follows ``returns_data``,
-    so it stands for the same quantity as a 'gaussian' or 'kde' scenario. It
-    is the one-period case of ``generate_horizon_samples_jointfm``, which
-    describes the request.
-
-    Parameters
-    ----------
-    num_scen : int
-        Number of scenarios to generate.
-    returns_data : pd.DataFrame
-        Historical one-period returns (dates x assets), oldest row first.
-    return_type : str
-        'LOG' or 'LINEAR', as in ReturnsComputeSettings.return_type.
-    freq : int
-        Return period in rows, as in ReturnsComputeSettings.freq; must be 1.
-    jointfm_settings : JointFMSettings
-        Where the client reads its environment.
-    seed : int, optional
-        Seed forwarded to the service's sampler. None (default) draws fresh
-        entropy, so repeated calls return different samples.
-
-    Returns
-    -------
-    np.ndarray
-        Generated samples with shape (num_scen, n_assets), columns in the
-        order of ``returns_data``.
-
-    Raises
-    ------
-    ImportError, ValueError
-        As ``generate_horizon_samples_jointfm``.
-    """
-    return generate_horizon_samples_jointfm(
-        num_scen, returns_data, return_type, freq, jointfm_settings, (1,), seed=seed
-    )[:, 0, :]
-
-
-def generate_horizon_samples_jointfm(
-    num_scen: int,
-    returns_data: pd.DataFrame,
-    return_type: str,
-    freq: int,
-    jointfm_settings: JointFMSettings,
-    horizons: Sequence[int],
-    seed: int = None,
-):
-    """Sample joint return scenarios over several horizons from one JointFM request.
-
-    The simulator sends each asset's log-price path, the cumulative sum of
-    its log returns ('LINEAR' returns through ``log1p``) starting from 0 at
-    the price before ``returns_data``, and forecasts the log price ``h``
-    periods after the last one for every ``h`` in ``horizons``. The path's
-    starting constant is arbitrary because the served model reads each column
-    relative to its last value. Each draw minus the path's last log price is
-    the log return over the next ``h`` periods, which is converted into
-    ``return_type``. Any finite log return maps to a positive price, so no
-    scenario implies a negative price.
-
-    All assets go into one request because a scenario is a draw from their
-    joint distribution; the ``jointfm-client`` SDK splits a large ``num_scen``
-    across requests and pooled instances along the sample axis, never across
-    assets. A deployment draws each horizon independently, so scenario ``s``
-    at one horizon and scenario ``s`` at another are not one path: each
-    horizon's scenarios describe the joint distribution of the assets at that
-    horizon alone.
-
-    Parameters
-    ----------
-    num_scen : int
-        Number of scenarios per horizon.
-    returns_data : pd.DataFrame
-        Historical one-period returns (dates x assets), oldest row first.
-        Only the most recent ``n_input`` points of the log-price path are
-        sent when it is longer than the history the served model accepts.
-    return_type : str
-        'LOG' or 'LINEAR', as in ReturnsComputeSettings.return_type.
-    freq : int
-        Return period in rows, as in ReturnsComputeSettings.freq; must be 1.
-    jointfm_settings : JointFMSettings
-        Where the client reads its environment (endpoint, credentials, and
-        the choice between a local instance, one deployment, or a pool).
-    horizons : sequence of int
-        Periods after the last observation, positive and strictly increasing.
-    seed : int, optional
-        Seed forwarded to the service's sampler. None (default) draws fresh
-        entropy, so repeated calls return different samples.
-
-    Returns
-    -------
-    np.ndarray
-        Returns over each horizon, shape (num_scen, len(horizons), n_assets),
-        columns in the order of ``returns_data``.
-
-    Raises
-    ------
-    ImportError
-        If the 'jointfm' extra is not installed.
-    ValueError
-        If ``return_type`` carries no price level ('ABSOLUTE', 'PNL') or
-        ``freq`` is not 1, so no log-price path reproduces the returns; if
-        ``horizons`` is empty, not positive, or not strictly increasing; if
-        the service reports no capacity envelope; if the asset count lies
-        outside its ``[min_series, max_series]`` or a horizon beyond its
-        ``n_output``; or if the response does not hold ``num_scen`` draws of
-        every asset at every horizon in order.
-    """
-    if return_type not in JOINTFM_RETURN_TYPES:
-        raise ValueError(
-            f"fit_type='jointfm' needs return_type in {JOINTFM_RETURN_TYPES}: it "
-            f"forecasts log prices, and {return_type!r} returns carry no price "
-            f"level to take a log of."
-        )
-    if freq != 1:
-        raise ValueError(
-            f"fit_type='jointfm' needs one-period returns (freq=1): overlapping "
-            f"returns over freq={freq} rows are moving sums that no one-step "
-            f"log-price path reproduces."
-        )
-    horizons = list(horizons)
-    if (
-        not horizons
-        or horizons[0] < 1
-        or any(b <= a for a, b in zip(horizons, horizons[1:]))
-    ):
-        raise ValueError(
-            f"JointFM horizons {horizons} must be positive and strictly increasing."
-        )
-
-    jointfm_client = _import_jointfm_client()
-    client = jointfm_client.JointFMClient.from_env(
-        dotenv_path=jointfm_settings.dotenv_path,
-        config_path=jointfm_settings.config_path,
-    )
-    envelope = client.health(cache=True).data_generation
-    if envelope is None:
-        raise ValueError(
-            "The JointFM service reports no 'data_generation' capacity envelope, "
-            "so the asset count and history length cannot be checked."
-        )
-
-    n_assets = returns_data.shape[1]
-    if not envelope.min_series <= n_assets <= envelope.max_series:
-        raise ValueError(
-            f"fit_type='jointfm' forecasts all assets jointly in one request, and "
-            f"the served model accepts {envelope.min_series} to "
-            f"{envelope.max_series} series; got {n_assets} assets. Choose a "
-            f"universe within that range."
-        )
-    if horizons[-1] > envelope.n_output:
-        raise ValueError(
-            f"The served model forecasts at most n_output={envelope.n_output} "
-            f"periods ahead; got horizon {horizons[-1]}."
-        )
-
-    asset_names = [str(column) for column in returns_data.columns]
-    log_returns = returns_data if return_type == "LOG" else np.log1p(returns_data)
-    log_prices = np.vstack(
-        [np.zeros((1, n_assets)), np.cumsum(log_returns.to_numpy(), axis=0)]
-    )
-    # Ordinal time is the row position, so the history needs no date index.
-    history = pd.DataFrame(log_prices[-envelope.n_input :], columns=asset_names)
-    forecast = client.forecast(
-        history,
-        query_times=[len(history) - 1 + h for h in horizons],
-        return_mode="samples",
-        n_samples=num_scen,
-        seed=seed,
-        target_columns=asset_names,
-        requested_columns=asset_names,
-    )
-
-    if tuple(forecast.requested_columns) != tuple(asset_names):
-        raise ValueError(
-            f"JointFM returned columns {list(forecast.requested_columns)}, "
-            f"expected {asset_names}."
-        )
-    expected_shape = (num_scen, len(horizons), n_assets)
-    if forecast.samples.shape != expected_shape:
-        raise ValueError(
-            f"JointFM returned samples of shape {forecast.samples.shape}, "
-            f"expected {expected_shape}."
-        )
-    horizon_log_returns = forecast.samples - history.iloc[-1].to_numpy()
-    if return_type == "LOG":
-        return horizon_log_returns
-    return np.expm1(horizon_log_returns)
-
-
-def expected_returns(
-    returns_dict: dict,
-    scenario_generation_settings: ScenarioGenerationSettings,
-    scenarios: np.ndarray,
-) -> np.ndarray:
-    """The expected returns ``generate_cvar_data`` stores in ``CvarData.mean``.
-
-    JointFM with ``expected_return='scenario'`` takes the mean of its own
-    scenarios; every other simulator, and JointFM with
-    ``expected_return='historical'``, takes the look-back window's mean.
-
-    Parameters
-    ----------
-    returns_dict : dict
-        The look-back window's returns as ``calculate_returns`` builds them.
-    scenario_generation_settings : ScenarioGenerationSettings
-        Settings the scenarios were generated with.
-    scenarios : np.ndarray
-        The simulator's next-period scenarios, shape ``(scenarios, assets)``.
-
-    Returns
-    -------
-    np.ndarray
-        Expected return per asset, shape ``(assets,)``.
-    """
-    jointfm_settings = scenario_generation_settings.jointfm_settings
-    if (
-        scenario_generation_settings.fit_type == "jointfm"
-        and jointfm_settings.expected_return == "scenario"
-    ):
-        return scenarios.mean(axis=0)
-    return returns_dict["mean"]
-
-
 def generate_cvar_data(
     returns_dict: dict,
     scenario_generation_settings: ScenarioGenerationSettings,
@@ -391,8 +126,10 @@ def generate_cvar_data(
 ):
     """Generate CvarData for CVaR optimization.
 
-    Creates the CvarData dataclass containing scenarios and probabilities
-    based on the specified fit type (Gaussian, KDE, historical, or JointFM).
+    Creates the CvarData dataclass from the scenarios of the generator that
+    ``scenario_generation_settings.fit_type`` names: a built-in one
+    ('gaussian', 'kde', 'no_fit') or an installed plugin's (see
+    ``scenario_generators``).
 
     Parameters
     ----------
@@ -400,7 +137,7 @@ def generate_cvar_data(
         Dictionary containing returns data with mean, covariance, and returns.
     scenario_generation_settings : ScenarioGenerationSettings
         Configuration for scenario generation including number of scenarios,
-        fit type, and KDE or JointFM settings.
+        fit type, and KDE or plugin settings.
     cash_return : float, default 0.0
         Return of cash over one period, in the units of the returns
         (``risk_free.cash_returns``); becomes ``CvarData.cash_return``.
@@ -413,67 +150,24 @@ def generate_cvar_data(
     Raises
     ------
     ValueError
-        If fit_type is not "gaussian", "kde", "no_fit", or "jointfm".
+        If no scenario generator has the name ``fit_type``, or the generator
+        returns scenarios whose shape does not match the assets.
     """
-    return_mean = returns_dict["mean"]
-    returns_data = returns_dict["returns"]
-    num_scen = scenario_generation_settings.num_scen
-    fit_type = scenario_generation_settings.fit_type
-    verbose = scenario_generation_settings.verbose
-    kde_settings = scenario_generation_settings.kde_settings
-    seed = scenario_generation_settings.seed
+    generator = scenario_generators.get(scenario_generation_settings.fit_type)
+    scenarios = generator(returns_dict, scenario_generation_settings)
 
-    if fit_type == "gaussian":  # Gaussian distribution
-        covariance = returns_dict["covariance"]
-        # default_rng(None) draws fresh entropy, matching the previous
-        # global-RNG behaviour when no seed is configured.
-        rng = np.random.default_rng(seed)
-        R_log = rng.multivariate_normal(return_mean, covariance, size=num_scen)
-        R = np.transpose(R_log)
-        p = np.ones(num_scen) / num_scen  # probability of each scenario
-
-    elif fit_type == "kde":  # kde distribution
-        R_log = generate_samples_kde(
-            num_scen,
-            returns_data,
-            kde_settings=kde_settings,
-            verbose=verbose,
-            seed=seed,
-        )
-        R = np.transpose(R_log)
-        p = np.ones(num_scen) / num_scen  # probability of each scenario
-
-    elif fit_type == "no_fit":  # use input data directly
-        # np.asarray first: returns_data is a DataFrame, and np.transpose on a
-        # DataFrame returns a DataFrame, which CvarData.R (typed np.ndarray)
-        # rejects at validation. The gaussian and kde paths already transpose
-        # ndarrays, so this was the only path that produced a DataFrame.
-        R = np.transpose(np.asarray(returns_data))
-        num_scen = R.shape[1]
-        p = np.ones(num_scen) / num_scen
-
-    elif fit_type == "jointfm":  # JointFM forecast distribution
-        jointfm_settings = scenario_generation_settings.jointfm_settings
-        R_log = generate_samples_jointfm(
-            num_scen,
-            returns_data,
-            returns_dict["return_type"],
-            returns_dict["freq"],
-            jointfm_settings,
-            seed=seed,
-        )
-        R = np.transpose(R_log)
-        p = np.ones(num_scen) / num_scen  # probability of each scenario
-        return_mean = expected_returns(
-            returns_dict, scenario_generation_settings, R_log
-        )
-
-    else:
+    R = np.asarray(scenarios.R)
+    n_assets = returns_dict["returns"].shape[1]
+    if R.ndim != 2 or R.shape[1] != n_assets:
         raise ValueError(
-            "Unsupported fit type: must be from gaussian, kde, no_fit, or jointfm."
+            f"Scenario generator {scenario_generation_settings.fit_type!r} returned "
+            f"scenarios of shape {R.shape}; expected (num_scenarios, {n_assets})."
         )
+    num_scen = R.shape[0]
+    p = np.ones(num_scen) / num_scen if scenarios.p is None else scenarios.p
+    mean = returns_dict["mean"] if scenarios.mean is None else scenarios.mean
 
-    cvar_data = CvarData(mean=return_mean, R=R, p=p, cash_return=cash_return)
+    cvar_data = CvarData(mean=mean, R=R.T, p=p, cash_return=cash_return)
 
     returns_dict["cvar_data"] = cvar_data
 

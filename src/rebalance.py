@@ -47,6 +47,7 @@ from . import (
     cvar_utils,
     portfolio,
     risk_free,
+    scenario_generators,
     utils,
 )
 from .cvar_data import CvarData
@@ -66,15 +67,6 @@ def ignore_decision(
     date: pd.Timestamp, cvar_data: CvarData, chosen: portfolio.Portfolio
 ) -> None:
     """Default ``decision_observer`` of ``rebalance_portfolio``: records nothing."""
-
-
-# Plot-title name of each ScenarioGenerationSettings.fit_type.
-SCENARIO_GENERATOR_NAMES = {
-    "gaussian": "Gaussian",
-    "kde": "KDE",
-    "no_fit": "Historical",
-    "jointfm": "JointFM",
-}
 
 
 class rebalance_portfolio:
@@ -848,9 +840,9 @@ class rebalance_portfolio:
             rebalance_type = self.re_optimize_type.replace("_", " ").title()
             if rebalance_type == "Pct Change":
                 rebalance_type = "Percentage Change"
-            scenario_generator = SCENARIO_GENERATOR_NAMES[
+            scenario_generator = scenario_generators.display_name(
                 self.scenario_generation_settings.fit_type
-            ]
+            )
             title = (
                 f"\n{rebalance_type} Rebalancing Strategy "
                 f"with {scenario_generator} Scenarios"

@@ -1,5 +1,4 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-FileCopyrightText: Copyright (c) 2026 DataRobot, Inc. and its affiliates. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """GPU-accelerated portfolio optimization powered by NVIDIA cuOpt."""
@@ -12,7 +11,6 @@ from .cvar_parameters import CvarParameters
 from .mean_variance_parameters import MeanVarianceParameters
 from .settings import (
     ApiSettings,
-    JointFMSettings,
     KDESettings,
     ReturnsComputeSettings,
     ScenarioGenerationSettings,
@@ -24,7 +22,6 @@ __all__ = [
     "CvarParameters",
     "MeanVarianceParameters",
     "ApiSettings",
-    "JointFMSettings",
     "KDESettings",
     "ReturnsComputeSettings",
     "ScenarioGenerationSettings",

@@ -35,22 +35,6 @@ cuda13 = [
 cuda13-socp = [
     "cuopt-cu13==26.6.*",
 ]
-# Client for the JointFM scenario simulator (fit_type="jointfm"); it reaches a
-# local JointFM instance or DataRobot deployments over HTTP.
-jointfm = [
-    "jointfm-client==0.14.*",
-]
-# Runs under experiments/, which are not part of the package: the simulator
-# comparison reads its YAML configuration, writes its results table as
-# Parquet, scores with SciPy, reports progress with tqdm, and reads the JointFM
-# service's process and the host's CPU use with psutil.
-experiments = [
-    "psutil>=7.1",
-    "pyarrow>=21",
-    "pyyaml>=6.0",
-    "scipy>=1.13",
-    "tqdm>=4.66",
-]
 
 [tool.ruff]
 line-length = 88
@@ -70,8 +54,6 @@ combine-as-imports = true
 known-first-party = ["portfolio_optimization"]
 
 [tool.pytest.ini_options]
-# experiments/ is imported from the repository root, not installed.
-pythonpath = ["."]
 markers = [
     "gpu: requires an NVIDIA GPU with cuOpt/cuML (deselect with -m 'not gpu')",
 ]

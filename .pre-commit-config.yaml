@@ -69,7 +69,7 @@ repos:
       # The Checks workflow skips this hook because the test jobs already run it.
       - id: pytest
         name: Run test suite
-        entry: uv run --group dev --extra experiments pytest tests/ -q
+        entry: uv run --group dev pytest tests/ -q
         language: system
         pass_filenames: false
-        files: ^((src|tests|experiments|skills|data)/.*|pyproject\.toml|uv\.lock)$
+        files: ^((src|tests|skills|data)/.*|pyproject\.toml|uv\.lock)$

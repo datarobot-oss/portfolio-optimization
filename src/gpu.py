@@ -36,7 +36,7 @@ def apply_gpu_selection(dotenv_path: Union[str, os.PathLike] = ".env") -> str:
     notebook's first cell; changing the selection afterwards needs a fresh process
     (a kernel restart).
 
-    The rules match the ``jointfm-client`` SDK and ``uv run --env-file``: a variable
+    The rules match ``uv run --env-file``: a variable
     already set in the process environment overrides the one in ``.env``, and a
     missing ``.env`` file is not an error. When neither sets the variable, it is set
     to ``DEFAULT_CUDA_VISIBLE_DEVICES`` (GPU 0), so a process never spreads over

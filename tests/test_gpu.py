@@ -36,9 +36,7 @@ def write_dotenv(tmp_path, text):
 
 class TestApplyGpuSelection:
     def test_applies_value_from_dotenv(self, fresh_process, tmp_path):
-        path = write_dotenv(
-            tmp_path, "JOINTFM_SCHEMA_VERSION=v6\nCUDA_VISIBLE_DEVICES=1,2\n"
-        )
+        path = write_dotenv(tmp_path, "OTHER_SETTING=v6\nCUDA_VISIBLE_DEVICES=1,2\n")
 
         assert apply_gpu_selection(path) == "1,2"
         assert os.environ[CUDA_VISIBLE_DEVICES] == "1,2"
@@ -55,7 +53,7 @@ class TestApplyGpuSelection:
         assert os.environ[CUDA_VISIBLE_DEVICES] == "0"
 
     def test_dotenv_without_variable_selects_gpu_zero(self, fresh_process, tmp_path):
-        path = write_dotenv(tmp_path, "JOINTFM_LOCAL_BASE_URL=http://127.0.0.1:8080\n")
+        path = write_dotenv(tmp_path, "SERVICE_URL=http://127.0.0.1:8080\n")
 
         assert apply_gpu_selection(path) == "0"
         assert os.environ[CUDA_VISIBLE_DEVICES] == "0"

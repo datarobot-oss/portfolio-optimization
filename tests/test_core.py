@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 DataRobot, Inc. and its affiliates. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
+from importlib.metadata import EntryPoint, EntryPoints
 
 import cvxpy as cp
 import matplotlib
@@ -12,29 +12,27 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-from portfolio_optimization import mean_variance_optimizer, rebalance, utils
+from portfolio_optimization import (
+    mean_variance_optimizer,
+    rebalance,
+    scenario_generators,
+)
 from portfolio_optimization.backtest import portfolio_backtester
 from portfolio_optimization.cvar_data import CvarData
 from portfolio_optimization.cvar_optimizer import CVaR
 from portfolio_optimization.cvar_parameters import CvarParameters
 from portfolio_optimization.cvar_utils import (
-    JOINTFM_INSTALL_HINT,
     _annualized_sharpe_ratio,
-    _import_jointfm_client,
     _select_efficient_frontier_key_portfolios,
     compute_CVaR,
     create_efficient_frontier,
-    expected_returns,
     generate_cvar_data,
-    generate_horizon_samples_jointfm,
-    generate_samples_jointfm,
     normalize_portfolio_weights_to_one,
 )
 from portfolio_optimization.mean_variance_parameters import MeanVarianceParameters
 from portfolio_optimization.portfolio import Portfolio
 from portfolio_optimization.settings import (
     ApiSettings,
-    JointFMSettings,
     KDESettings,
     ReturnsComputeSettings,
     ScenarioGenerationSettings,
@@ -446,249 +444,98 @@ class TestGenerateCvarData:
             ScenarioGenerationSettings(num_scen=50, fit_type="magic")
 
 
-class TestJointFMSettings:
-    def test_jointfm_fit_type_gets_default_settings(self):
-        settings = ScenarioGenerationSettings(fit_type="jointfm")
-        assert settings.jointfm_settings == JointFMSettings()
-        assert settings.jointfm_settings.expected_return == "scenario"
+class TestScenarioGeneratorRegistry:
+    """fit_type names a built-in, registered, or entry-point scenario generator."""
 
-    def test_explicit_jointfm_settings_are_kept(self):
-        jointfm_settings = JointFMSettings(
-            expected_return="historical", dotenv_path=None, config_path=None
+    @pytest.fixture(autouse=True)
+    def _isolated_registry(self, monkeypatch):
+        monkeypatch.setattr(
+            scenario_generators, "_REGISTRY", dict(scenario_generators._REGISTRY)
         )
+
+    def test_built_in_generators_are_available(self):
+        assert {"gaussian", "kde", "no_fit"} <= set(scenario_generators.available())
+
+    def test_unknown_fit_type_names_the_available_generators(self):
+        with pytest.raises(ValidationError, match="Unknown fit_type 'magic'.*no_fit"):
+            ScenarioGenerationSettings(fit_type="magic")
+
+    def test_registered_generator_feeds_cvar_data(self, returns_dict):
+        n_assets = len(TICKERS)
+        R = np.arange(4 * n_assets, dtype=float).reshape(4, n_assets) / 100
+        mean = np.full(n_assets, 0.002)
+        p = np.array([0.1, 0.2, 0.3, 0.4])
+        calls = []
+
+        def generator(returns_dict, settings):
+            calls.append(settings)
+            return scenario_generators.Scenarios(R, mean=mean, p=p)
+
+        scenario_generators.register("custom", generator)
         settings = ScenarioGenerationSettings(
-            fit_type="jointfm", jointfm_settings=jointfm_settings
-        )
-        assert settings.jointfm_settings == jointfm_settings
-
-    def test_other_fit_types_get_no_jointfm_settings(self):
-        settings = ScenarioGenerationSettings(fit_type="kde")
-        assert settings.jointfm_settings is None
-
-    def test_invalid_expected_return(self):
-        with pytest.raises(ValidationError):
-            JointFMSettings(expected_return="forecast")
-
-
-class TestJointFMExtra:
-    def test_missing_extra_raises_install_hint(self, monkeypatch):
-        # A None entry in sys.modules makes the import fail as if uninstalled.
-        monkeypatch.setitem(sys.modules, "jointfm_client", None)
-        with pytest.raises(ImportError, match="--extra jointfm") as excinfo:
-            _import_jointfm_client()
-        assert str(excinfo.value) == JOINTFM_INSTALL_HINT
-        assert isinstance(excinfo.value.__cause__, ImportError)
-
-    def test_installed_extra_is_imported(self):
-        jointfm_client = pytest.importorskip("jointfm_client")
-        assert _import_jointfm_client() is jointfm_client
-
-
-class TestJointFMSimulator:
-    def _settings(self, **kwargs):
-        return ScenarioGenerationSettings(
-            num_scen=25, fit_type="jointfm", seed=11, **kwargs
-        )
-
-    def test_scenarios_feed_cvar_data(self, returns_dict, fake_jointfm):
-        cd = generate_cvar_data(returns_dict, self._settings())["cvar_data"]
-        assert cd.R.shape == (3, 25)
-        np.testing.assert_allclose(cd.p, np.full(25, 1 / 25))
-        # The default takes expected returns from the scenarios themselves.
-        np.testing.assert_allclose(cd.mean, cd.R.mean(axis=1))
-
-    def test_historical_expected_returns_keep_the_scenarios(
-        self, returns_dict, fake_jointfm
-    ):
-        historical = generate_cvar_data(
-            dict(returns_dict),
-            self._settings(
-                jointfm_settings=JointFMSettings(expected_return="historical")
-            ),
-        )["cvar_data"]
-        scenario = generate_cvar_data(dict(returns_dict), self._settings())["cvar_data"]
-        np.testing.assert_array_equal(historical.R, scenario.R)
-        np.testing.assert_array_equal(historical.mean, returns_dict["mean"])
-        np.testing.assert_array_equal(
-            expected_returns(returns_dict, self._settings(), scenario.R.T),
-            scenario.mean,
-        )
-
-    def test_one_joint_next_step_request(self, returns_dict, fake_jointfm):
-        generate_cvar_data(returns_dict, self._settings())
-        (call,) = fake_jointfm.forecast_calls
-        assert call["n_samples"] == 25
-        assert call["seed"] == 11
-        assert call["return_mode"] == "samples"
-        assert call["target_columns"] == TICKERS
-        assert call["requested_columns"] == TICKERS
-        assert call["query_times"] == [len(call["history"])]
-
-    @staticmethod
-    def _assert_log_prices_up_to_constant(history, prices):
-        """The history is the log of ``prices`` shifted by one constant per asset."""
-        assert list(history.columns) == list(prices.columns)
-        offsets = history.to_numpy() - np.log(prices.to_numpy())
-        np.testing.assert_allclose(
-            offsets, np.broadcast_to(offsets[0], offsets.shape), rtol=0, atol=1e-12
-        )
-
-    @pytest.mark.parametrize("return_type", ["LOG", "LINEAR"])
-    def test_history_is_log_price_path(self, price_data, fake_jointfm, return_type):
-        returns_dict = calculate_returns(
-            price_data,
-            regime_dict=None,
-            returns_compute_settings=ReturnsComputeSettings(
-                return_type=return_type, freq=1
-            ),
-        )
-        fake_jointfm.envelope.n_input = 1000
-        generate_cvar_data(returns_dict, self._settings())
-        history = fake_jointfm.forecast_calls[0]["history"]
-        self._assert_log_prices_up_to_constant(history, price_data)
-        # The path starts from 0 at the price before the first return.
-        np.testing.assert_array_equal(history.iloc[0], 0.0)
-
-    def test_history_cut_to_n_input(self, price_data, returns_dict, fake_jointfm):
-        n_input = fake_jointfm.envelope.n_input
-        assert len(returns_dict["returns"]) > n_input
-        generate_cvar_data(returns_dict, self._settings())
-        history = fake_jointfm.forecast_calls[0]["history"]
-        self._assert_log_prices_up_to_constant(history, price_data.iloc[-n_input:])
-
-    @pytest.mark.parametrize("return_type", ["LOG", "LINEAR"])
-    def test_forecast_log_price_becomes_next_return(
-        self, returns_dict, fake_jointfm, return_type
-    ):
-        samples = generate_samples_jointfm(
-            25, returns_dict["returns"], return_type, 1, JointFMSettings(), seed=3
-        )
-        (call,) = fake_jointfm.forecast_calls
-        last_log_prices = call["history"].iloc[-1].to_numpy()
-        assert np.all(np.abs(last_log_prices) > 1e-3)
-        next_log_returns = call["samples"][:, 0, :] - last_log_prices
-        expected = (
-            next_log_returns if return_type == "LOG" else np.expm1(next_log_returns)
-        )
-        np.testing.assert_allclose(samples, expected)
-        assert samples.flags.writeable
-
-    @pytest.mark.parametrize("return_type", ["LOG", "LINEAR"])
-    def test_horizon_samples_are_returns_over_each_horizon(
-        self, returns_dict, fake_jointfm, return_type
-    ):
-        """Each horizon's draw minus the last log price is its h-period return."""
-        samples = generate_horizon_samples_jointfm(
-            25,
-            returns_dict["returns"],
-            return_type,
-            1,
-            JointFMSettings(),
-            (1, 5, 21),
-            seed=3,
-        )
-        (call,) = fake_jointfm.forecast_calls
-        last = len(call["history"]) - 1
-        assert call["query_times"] == [last + 1, last + 5, last + 21]
-        log_returns = call["samples"] - call["history"].iloc[-1].to_numpy()
-        expected = log_returns if return_type == "LOG" else np.expm1(log_returns)
-        assert samples.shape == (25, 3, len(TICKERS))
-        np.testing.assert_allclose(samples, expected)
-
-    def test_horizon_beyond_n_output_is_refused(self, returns_dict, fake_jointfm):
-        """A horizon past the served model's n_output is refused before sending."""
-        fake_jointfm.envelope.n_output = 20
-        with pytest.raises(ValueError, match="n_output=20"):
-            generate_horizon_samples_jointfm(
-                25, returns_dict["returns"], "LOG", 1, JointFMSettings(), (1, 21)
-            )
-        assert fake_jointfm.forecast_calls == []
-
-    @pytest.mark.parametrize("horizons", [(), (0, 1), (5, 5), (5, 1)])
-    def test_invalid_horizons_are_refused(self, returns_dict, fake_jointfm, horizons):
-        """Empty, non-positive, or non-increasing horizons never reach the client."""
-        with pytest.raises(ValueError, match="strictly increasing"):
-            generate_horizon_samples_jointfm(
-                25, returns_dict["returns"], "LOG", 1, JointFMSettings(), horizons
-            )
-        assert fake_jointfm.from_env_kwargs is None
-
-    def test_scenarios_never_imply_non_positive_prices(
-        self, returns_dict, fake_jointfm
-    ):
-        """A strongly negative forecast log return still maps to a price above 0."""
-        returns_dict["return_type"] = "LINEAR"
-        returns_dict["returns"] = np.expm1(returns_dict["returns"])
-        fake_jointfm.sample_scale = 5.0
-        cd = generate_cvar_data(returns_dict, self._settings())["cvar_data"]
-        assert cd.R.min() < -0.9
-        assert np.all(1.0 + cd.R > 0.0)
-
-    @pytest.mark.parametrize("return_type", ["ABSOLUTE", "PNL"])
-    def test_return_type_without_price_level_is_refused(
-        self, returns_dict, fake_jointfm, return_type
-    ):
-        returns_dict["return_type"] = return_type
-        with pytest.raises(ValueError, match="return_type"):
-            generate_cvar_data(returns_dict, self._settings())
-        assert fake_jointfm.from_env_kwargs is None
-
-    def test_overlapping_returns_are_refused(self, returns_dict, fake_jointfm):
-        returns_dict["freq"] = 5
-        with pytest.raises(ValueError, match="freq=5"):
-            generate_cvar_data(returns_dict, self._settings())
-        assert fake_jointfm.from_env_kwargs is None
-
-    def test_client_reads_settings_environment(self, returns_dict, fake_jointfm):
-        settings = self._settings(
-            jointfm_settings=JointFMSettings(dotenv_path=None, config_path="c.yaml")
-        )
-        generate_cvar_data(returns_dict, settings)
-        assert fake_jointfm.from_env_kwargs == {
-            "dotenv_path": None,
-            "config_path": "c.yaml",
-        }
-
-    @pytest.mark.parametrize("min_series,max_series", [(1, 2), (4, 10)])
-    def test_universe_outside_capacity_is_refused(
-        self, returns_dict, fake_jointfm, min_series, max_series
-    ):
-        fake_jointfm.envelope.min_series = min_series
-        fake_jointfm.envelope.max_series = max_series
-        with pytest.raises(ValueError, match="got 3 assets"):
-            generate_cvar_data(returns_dict, self._settings())
-        assert fake_jointfm.forecast_calls == []
-
-    def test_missing_capacity_envelope_is_refused(self, returns_dict, fake_jointfm):
-        fake_jointfm.envelope = None
-        with pytest.raises(ValueError, match="data_generation"):
-            generate_cvar_data(returns_dict, self._settings())
-        assert fake_jointfm.forecast_calls == []
-
-    def test_scenario_expected_return_leaves_returns_dict_mean(
-        self, returns_dict, fake_jointfm
-    ):
-        historical_mean = returns_dict["mean"].copy()
-        cd = generate_cvar_data(returns_dict, self._settings())["cvar_data"]
-        assert not np.allclose(cd.mean, historical_mean)
-        np.testing.assert_array_equal(returns_dict["mean"], historical_mean)
-
-    def test_historical_expected_return_is_window_mean(
-        self, returns_dict, fake_jointfm
-    ):
-        settings = self._settings(
-            jointfm_settings=JointFMSettings(expected_return="historical")
+            fit_type="custom", generator_options={"alpha": 0.5}
         )
         cd = generate_cvar_data(returns_dict, settings)["cvar_data"]
-        np.testing.assert_array_equal(cd.mean, returns_dict["mean"])
+        np.testing.assert_array_equal(cd.R, R.T)
+        np.testing.assert_array_equal(cd.mean, mean)
+        np.testing.assert_array_equal(cd.p, p)
+        assert calls[0].generator_options == {"alpha": 0.5}
 
+    def test_generator_defaults_to_window_mean_and_equal_weights(self, returns_dict):
+        R = np.zeros((5, len(TICKERS)))
+        scenario_generators.register(
+            "custom", lambda returns_dict, settings: scenario_generators.Scenarios(R)
+        )
+        cd = generate_cvar_data(
+            returns_dict, ScenarioGenerationSettings(fit_type="custom")
+        )["cvar_data"]
+        np.testing.assert_array_equal(cd.mean, returns_dict["mean"])
+        np.testing.assert_allclose(cd.p, np.full(5, 0.2))
+
+    def test_scenarios_of_the_wrong_width_are_refused(self, returns_dict):
+        scenario_generators.register(
+            "custom",
+            lambda returns_dict, settings: scenario_generators.Scenarios(
+                np.zeros((5, len(TICKERS) + 1))
+            ),
+        )
+        with pytest.raises(ValueError, match="expected \\(num_scenarios, 3\\)"):
+            generate_cvar_data(
+                returns_dict, ScenarioGenerationSettings(fit_type="custom")
+            )
+
+    def test_installed_plugin_is_found_through_its_entry_point(
+        self, monkeypatch, returns_dict
+    ):
+        plugin = EntryPoint(
+            "from_plugin",
+            "portfolio_optimization.scenario_generators:_no_fit",
+            scenario_generators.ENTRY_POINT_GROUP,
+        )
+        monkeypatch.setattr(
+            scenario_generators,
+            "entry_points",
+            lambda group, **select: EntryPoints([plugin]).select(group=group, **select),
+        )
+        assert "from_plugin" in scenario_generators.available()
+        settings = ScenarioGenerationSettings(fit_type="from_plugin")
+        cd = generate_cvar_data(returns_dict, settings)["cvar_data"]
+        np.testing.assert_array_equal(cd.R, returns_dict["returns"].to_numpy().T)
+
+    def test_display_name(self):
+        scenario_generators.register("custom", lambda returns_dict, settings: None)
+        assert scenario_generators.display_name("kde") == "KDE"
+        assert scenario_generators.display_name("custom") == "custom"
+
+
+class TestRebalancing:
     def _rebalancer(
         self,
         tmp_path,
         cvar_params,
-        returns_compute_settings,
         losing=False,
         api_settings=None,
+        fit_type="gaussian",
         # Any period return is below +100%, so every period re-optimizes.
         re_optimize_criteria=(("type", "pct_change"), ("threshold", 1.0)),
     ):
@@ -707,11 +554,9 @@ class TestJointFMSimulator:
 
         return rebalance.rebalance_portfolio(
             dataset_directory=str(price_path),
-            returns_compute_settings=returns_compute_settings,
-            # The price frames set the sign of the historical mean, which the
-            # risk-aversion scaling reads; the fake client's scenario mean is noise.
-            scenario_generation_settings=self._settings(
-                jointfm_settings=JointFMSettings(expected_return="historical")
+            returns_compute_settings=ReturnsComputeSettings(return_type="LOG", freq=1),
+            scenario_generation_settings=ScenarioGenerationSettings(
+                num_scen=25, fit_type=fit_type, seed=11
             ),
             trading_start="2023-05-01",
             trading_end="2023-08-31",
@@ -723,13 +568,10 @@ class TestJointFMSimulator:
             api_settings=api_settings,
         )
 
-    def test_every_step_re_optimizes_after_every_window(
-        self, tmp_path, fake_jointfm, cvar_params
-    ):
+    def test_every_step_re_optimizes_after_every_window(self, tmp_path, cvar_params):
         rebalancer = self._rebalancer(
             tmp_path,
             cvar_params,
-            ReturnsComputeSettings(return_type="LOG", freq=1),
             re_optimize_criteria=(("type", "every_step"), ("threshold", None)),
         )
         _, re_optimize_dates, _ = rebalancer.re_optimize()
@@ -741,31 +583,24 @@ class TestJointFMSimulator:
             rebalancer.dates_range[window:last_start:window]
         )
 
-    def test_unknown_re_optimization_type_is_refused(
-        self, tmp_path, fake_jointfm, cvar_params
-    ):
+    def test_unknown_re_optimization_type_is_refused(self, tmp_path, cvar_params):
         with pytest.raises(ValueError, match="Unknown re-optimization type 'monthly'"):
             self._rebalancer(
                 tmp_path,
                 cvar_params,
-                ReturnsComputeSettings(return_type="LOG", freq=1),
                 re_optimize_criteria=(("type", "monthly"), ("threshold", 0.0)),
             )
 
     def test_rebalancing_applies_api_settings_to_every_optimization(
-        self, tmp_path, fake_jointfm, cvar_params
+        self, tmp_path, cvar_params
     ):
         """Unscaled risk aversion carries a rebalancing run through losing windows."""
-        returns_compute_settings = ReturnsComputeSettings(return_type="LOG", freq=1)
         with pytest.raises(ValueError, match="scale_risk_aversion=False"):
-            self._rebalancer(
-                tmp_path, cvar_params, returns_compute_settings, losing=True
-            )
+            self._rebalancer(tmp_path, cvar_params, losing=True)
 
         rebalancer = self._rebalancer(
             tmp_path,
             cvar_params,
-            returns_compute_settings,
             losing=True,
             api_settings=ApiSettings(scale_risk_aversion=False),
         )
@@ -773,11 +608,16 @@ class TestJointFMSimulator:
         assert len(re_optimize_dates) > 1
 
     def test_rebalancing_plot_names_scenario_generator(
-        self, tmp_path, fake_jointfm, cvar_params
+        self, tmp_path, cvar_params, monkeypatch
     ):
         """Title and file name say which scenario generator drove the rebalancing."""
-        returns_compute_settings = ReturnsComputeSettings(return_type="LOG", freq=1)
-        rebalancer = self._rebalancer(tmp_path, cvar_params, returns_compute_settings)
+
+        def custom(returns_dict, settings):
+            return scenario_generators.get("gaussian")(returns_dict, settings)
+
+        custom.display_name = "Custom"
+        monkeypatch.setitem(scenario_generators._REGISTRY, "custom", custom)
+        rebalancer = self._rebalancer(tmp_path, cvar_params, fit_type="custom")
         results_dir = tmp_path / "plots"
         rebalancer.re_optimize(
             plot_results=True, save_plot=True, results_dir=str(results_dir)
@@ -786,42 +626,10 @@ class TestJointFMSimulator:
         title = plt.gcf().axes[0].get_title()
         plt.close("all")
         assert title.strip() == (
-            "Percentage Change Rebalancing Strategy with JointFM Scenarios"
+            "Percentage Change Rebalancing Strategy with Custom Scenarios"
         )
         (saved_plot,) = results_dir.iterdir()
-        assert saved_plot.name.startswith("rebalancing_jointfm_pct-change_")
-
-    def test_rebalancing_forecasts_each_look_back_window(
-        self, tmp_path, fake_jointfm, cvar_params
-    ):
-        """Every rebalance sends the log-price path of that date's look-back window."""
-        returns_compute_settings = ReturnsComputeSettings(return_type="LOG", freq=1)
-        rebalancer = self._rebalancer(tmp_path, cvar_params, returns_compute_settings)
-        _, re_optimize_dates, _ = rebalancer.re_optimize()
-
-        # One buy-and-hold optimization at trading_start, then one per rebalance.
-        optimize_dates = [pd.Timestamp("2023-05-01"), *re_optimize_dates]
-        assert len(re_optimize_dates) > 1
-        assert len(fake_jointfm.forecast_calls) == len(optimize_dates)
-        n_input = fake_jointfm.envelope.n_input
-        for call, optimize_date in zip(
-            fake_jointfm.forecast_calls, optimize_dates, strict=True
-        ):
-            window_range = (
-                (optimize_date - pd.Timedelta(days=60)).strftime("%Y-%m-%d"),
-                optimize_date.strftime("%Y-%m-%d"),
-            )
-            window = utils.calculate_returns(
-                rebalancer.price_data,
-                {"name": "re-optimize", "range": window_range},
-                returns_compute_settings,
-            )["returns"]
-            window_prices = rebalancer.price_data.loc[slice(*window_range)]
-            assert len(window_prices) == len(window) + 1 > n_input
-            assert window.index[-1] == window_prices.index[-1] <= optimize_date
-            self._assert_log_prices_up_to_constant(
-                call["history"], window_prices.iloc[-n_input:]
-            )
+        assert saved_plot.name.startswith("rebalancing_custom_pct-change_")
 
 
 # ---------------------------------------------------------------------------

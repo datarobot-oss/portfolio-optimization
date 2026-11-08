@@ -106,8 +106,6 @@ uv sync --extra cuda13 --group notebooks # full CUDA 13 stack currently tracks c
 # uv sync --extra cuda12 --group notebooks
 # For direct SOCP testing on CUDA 13 with cuOpt 26.06:
 # uv sync --extra cuda13-socp --group notebooks
-# For JointFM scenario generation (fit_type="jointfm"), add the jointfm-client SDK:
-# uv sync --extra cuda13 --extra jointfm --group notebooks
 
 # Optional: Install development tools (ruff, pytest, pre-commit)
 uv sync --extra cuda13 --group notebooks --group dev
@@ -152,7 +150,6 @@ Explore the example notebooks in the [`notebooks/`](notebooks/) directory:
 - **`cvar_basic.ipynb`**: Complete walkthrough of Mean-CVaR portfolio optimization with GPU acceleration
 - **`efficient_frontier.ipynb`**: A quick tutorial on how to generate efficient frontier.
 - **`rebalancing_strategies.ipynb`** Introduction to dynamic re-balancing and examples of testing strategies
-- **`cvar_jointfm.ipynb`**: Mean-CVaR optimization on scenarios from the JointFM foundation model (see [JointFM Scenarios](#jointfm-scenarios))
 
 ### GPU Selection
 
@@ -167,97 +164,26 @@ The variable must be set before anything imports cvxpy, because cvxpy creates th
 - **Notebooks.** The first code cell of every GPU notebook calls `apply_gpu_selection("../.env")` from `portfolio_optimization.gpu`, which applies the variable and refuses to run once cvxpy, cuOpt, cuML, or RMM is imported. Restart the kernel to change the selection.
 - **Scripts and the Streamlit demo.** Start them with `uv run --env-file .env`, for example `uv run --env-file .env python my_script.py`, or call `apply_gpu_selection(".env")` before the script's first cvxpy import.
 
-**Parallel runs.** `run_on_gpus(job, job_kwargs)` from `portfolio_optimization.gpu` runs independent jobs, such as whole rebalancing runs (`rebalance.run_rebalancing`) or scenario-generator arms, in spawned worker processes, one per GPU that `CUDA_VISIBLE_DEVICES` lists. Each worker sees only its own GPU, and an idle worker takes the next waiting job. With one GPU listed, the jobs run in sequence in the calling process. `rebalancing_strategies.ipynb` runs its strategies this way. A job must be a module-level function of an importable module, its arguments and result must be picklable, and a script that calls it with several GPUs needs an `if __name__ == "__main__":` guard. Worker start-up (the cvxpy and cuOpt imports) takes seconds, so it pays off for whole runs, not for sub-second solves.
+**Parallel runs.** `run_on_gpus(job, job_kwargs)` from `portfolio_optimization.gpu` runs independent jobs, such as whole rebalancing runs (`rebalance.run_rebalancing`), in spawned worker processes, one per GPU that `CUDA_VISIBLE_DEVICES` lists. Each worker sees only its own GPU, and an idle worker takes the next waiting job. With one GPU listed, the jobs run in sequence in the calling process. `rebalancing_strategies.ipynb` runs its strategies this way. A job must be a module-level function of an importable module, its arguments and result must be picklable, and a script that calls it with several GPUs needs an `if __name__ == "__main__":` guard. Worker start-up (the cvxpy and cuOpt imports) takes seconds, so it pays off for whole runs, not for sub-second solves.
 
-### JointFM Scenarios
+### Custom Scenario Generators
 
-`fit_type="jointfm"` draws scenarios from [JointFM](https://github.com/datarobot/joint-client-python), a foundation model that forecasts the joint distribution of several time series, instead of fitting a KDE or Gaussian to the look-back window. Each scenario is one joint draw of the next period's asset returns, forecast from the look-back window, so it stands for the same quantity as the other fit types and everything downstream of `generate_cvar_data` is unchanged.
+`ScenarioGenerationSettings.fit_type` names the scenario generator that `generate_cvar_data`, and with it the efficient frontier and rebalancing, draws scenarios from. Besides the built-in `gaussian`, `kde`, and `no_fit`, it can name a generator that another package provides, so a new scenario model plugs in without a change to this library.
 
-The library reaches JointFM through the [`jointfm-client`](https://pypi.org/project/jointfm-client/) SDK, installed with the optional `jointfm` extra:
+A generator is a function `generate(returns_dict, settings)` that returns `scenario_generators.Scenarios(R, mean=None, p=None)`. `R` holds the scenarios, shape `(num_scenarios, n_assets)`; `mean` replaces the expected returns (None keeps the look-back window's mean), and `p` the scenario probabilities (None weights them equally). `returns_dict` is what `utils.calculate_returns` builds, `return_type` and `freq` included, and `settings.generator_options` holds the generator's own options.
 
-```bash
-uv sync --extra jointfm --group notebooks  # add your CUDA extra as above
+A package makes its generator available by declaring an entry point, and `fit_type="<name>"` works once the package is installed:
+
+```toml
+[project.entry-points."portfolio_optimization.scenario_generators"]
+my_model = "my_package:generate"
 ```
-
-The SDK reads its connection settings from a `.env` file in the repository root. Copy the template and set exactly one selector in it; the same code then runs against any of the four, and only `.env` changes:
-
-```bash
-cp .env.sample .env
-```
-
-| Selector | JointFM service |
-| --- | --- |
-| `JOINTFM_LOCAL_BASE_URL` | An instance you run yourself |
-| `JOINTFM_LOCAL_BASE_URLS` | Several instances serving the same checkpoint |
-| `JOINTFM_DEPLOYMENT_ID` | One DataRobot deployment (also needs `DATAROBOT_ENDPOINT` and `DATAROBOT_API_TOKEN`) |
-| `JOINTFM_DEPLOYMENT_IDS` | A pool of DataRobot deployments serving the same checkpoint (same credentials) |
-
-`.env` is git-ignored, so the API token stays out of version control. A variable set in the process environment overrides the same variable in `.env`, but selectors from both places count together, so switching to another service means changing the selector in `.env`.
 
 ```python
-from portfolio_optimization import cvar_utils
-from portfolio_optimization.settings import JointFMSettings, ScenarioGenerationSettings
-
-scenario_generation_settings = ScenarioGenerationSettings(
-    num_scen=10000,
-    fit_type="jointfm",
-    jointfm_settings=JointFMSettings(dotenv_path=".env"),  # run from the repository root
-)
-returns_dict = cvar_utils.generate_cvar_data(returns_dict, scenario_generation_settings)
+ScenarioGenerationSettings(num_scen=10000, fit_type="my_model", generator_options={"alpha": 0.5})
 ```
 
-- **Universe size.** All assets go into one request, because a scenario is a draw from their joint distribution. The universe must fit the served model's `max_series`, which the service reports in its health response; a larger universe is refused rather than split.
-- **Log prices.** The simulator rebuilds each asset's log-price path from the look-back window's returns: the cumulative sum of its log returns (`LINEAR` returns converted with `log1p`), starting from 0 at the price before the window. It forecasts the next log price, subtracts the path's last log price to get the next log return, and converts that into the configured return type (`expm1` for `LINEAR`). The path's starting constant does not matter, because the model reads each series relative to its last value. Any log return maps to a positive price, so prices implied by the scenarios are always positive. This needs `ReturnsComputeSettings(return_type="LOG" or "LINEAR", freq=1)`; other return types and overlapping returns are refused.
-- **History.** A log-price path longer than the served model's `n_input` points is cut to its most recent `n_input` points.
-- **Scenario count.** The SDK splits a large `num_scen` across requests and pooled instances, so it is not limited by one instance's capacity.
-- **Expected return.** By default the optimizer's expected returns are the mean of the JointFM scenarios, so expected return and CVaR come from the same forecast. `JointFMSettings(expected_return="historical")` uses the look-back window's mean instead, as the other fit types do.
-- **Longer horizons.** `cvar_utils.generate_horizon_samples_jointfm` forecasts the returns over several horizons, each a number of periods after the last observation up to the served model's `n_output`, in one request, from the same log-price path. The service draws each horizon independently, so the scenarios at two horizons are not paths.
-
-See [`notebooks/cvar_jointfm.ipynb`](notebooks/cvar_jointfm.ipynb) for a complete example.
-
-### Experiments
-
-[`experiments/`](experiments/) holds experiments that measure the library's components; they are not part of the installed package. [`experiments/simulator_comparison/`](experiments/simulator_comparison/README.md) runs every scenario simulator on the same random asset universes and forecast dates. It scores how realistic each simulator's scenarios are against the realized returns over the next day and over longer horizons, and times scenario generation on CPU and on GPU.
-
-A YAML file under [`experiments/simulator_comparison/configs/`](experiments/simulator_comparison/configs/) describes each experiment completely, validated by a pydantic model. The [`Taskfile.yml`](Taskfile.yml) at the repository root runs and evaluates experiments with [Task](https://taskfile.dev/installation/), so its commands only name the config. `task --list` shows every task.
-
-```bash
-task setup                                   # reconcile uv.lock, install everything the tasks use, the pre-commit hooks, and the Jupyter kernel
-task pre-commit                              # every pre-commit hook on all files, the pytest suite included
-task experiments:pilot                       # every experiment at a small size, resuming its results
-task experiments:full                        # every experiment at full size, resuming its results
-task experiments:all                         # run and report everything of full.yaml alone, resuming its results
-task experiments:fresh                       # delete full.yaml's outputs, run and report everything
-task experiments:run CONFIG=experiments/simulator_comparison/configs/full.yaml
-task experiments:report CONFIG=experiments/simulator_comparison/configs/full.yaml
-task experiments:test                        # CPU tests, no GPU or JointFM service needed
-task data:risk-free-rates                    # download the T-bill rates the rebalancing backtests need
-```
-
-| Task | What it does |
-| --- | --- |
-| `setup` | Runs `uv lock`, which changes `uv.lock` only where `pyproject.toml` changed and keeps every other pin, then installs the locked environment with the `CUDA_EXTRA`, `jointfm`, and `experiments` extras and the `dev` and `notebooks` groups. It reports whether `uv.lock` has uncommitted changes. |
-| `lock:upgrade` | Moves every pin in `uv.lock` to the newest version `pyproject.toml` allows, installs it, and runs `experiments:test`. Run it deliberately, between experiments whose results are compared, and commit `uv.lock` once the tests and a pilot run pass. |
-| `pre-commit` | Runs every hook of [`.pre-commit-config.yaml`](.pre-commit-config.yaml) on all files, the pytest suite included. A `git commit` runs the same hooks on the files it stages, once `setup` has installed them. |
-| `experiments:pilot` | Runs every experiment at a small size: `pilot.yaml` and its next-day, long-history, and risk-averse twins, with every report and the paired comparison of each twin against the base, to measure cost per arm and noise before the full run and to recheck a newly served checkpoint. Rerunning resumes every results file. |
-| `experiments:pilot-fresh` | Deletes every output of `experiments:pilot`, then runs it from scratch |
-| `experiments:full` | Runs every experiment at full size: `full.yaml` and its risk-averse twin, with both reports and the paired comparison of the two backtests. Rerunning resumes every results file. |
-| `experiments:full-fresh` | Deletes every output of `experiments:full`, then runs it from scratch |
-| `experiments:run` | Runs a config (default `full.yaml`). Rerunning resumes its results file, and a larger `trials` extends it. |
-| `experiments:report` | Writes the tables and plots of a config's results. `EXCLUDE` leaves out arms, for example one whose session is still running (`EXCLUDE=jointfm-cpu`). |
-| `experiments:rebalance` | Runs a config's rebalancing backtests (each trial's universe, once per simulator) and writes their report: returns, drawdown, Sharpe, Sortino, and Calmar ratios, turnover |
-| `experiments:rebalance-report` | Writes the rebalancing report of a config's results without running anything |
-| `experiments:blog` | Writes the blog figures of a config's scenario and rebalancing results to `<output stem>_blog/`, without running anything: the readings a post about JointFM shows, apart from the reports, which show every reading |
-| `experiments:paired` | Compares, trial by trial and without running anything, the results of two configs `BASELINE` and `CONFIG` that differ only in `SETTING` (`look_back`, `horizons`, `risk_aversion`, or `checkpoint`) and their output files; `RESULTS` picks their `scenario` or `rebalancing` results |
-| `experiments:all` | Runs a config's scenario comparison (default `full.yaml`), the rebalancing backtests, both reports, and the blog figures. Rerunning resumes both results files, so it continues an interrupted `experiments:fresh`. |
-| `experiments:fresh` | Deletes every output of a config (default `full.yaml`), then runs `experiments:all` from scratch |
-| `experiments:devices` | Times every rebalancing decision of a CPU-against-GPU config (default `devices.yaml`) by stage, once with JointFM and the solver on the GPU (`GPU_URL`) and once on the CPU (`CPU_URL`), solves each decision's problem with every paired solver, and writes its report. Rerunning resumes its results file. |
-| `experiments:devices-fresh` | Deletes every output of a CPU-against-GPU config, then runs `experiments:devices` from scratch |
-| `experiments:devices-report` | Writes the tables and figures of a CPU-against-GPU config's results without running anything |
-| `experiments:test` | Runs the experiments' CPU tests |
-| `data:risk-free-rates` | Downloads the daily 3-month Treasury bill rate (FRED DTB3) to `data/rates/dtb3.csv`, the rate cash earns in the rebalancing backtests |
-
-The experiments need the `experiments` extra (`psutil`, `pyarrow`, `pyyaml`, `scipy`, `tqdm`), which the tasks install. `CUDA_EXTRA` (default `cuda13`) selects the CUDA extra for the GPU arm. The experiments read `.env` like the library does: its JointFM selector picks the service of the `jointfm` arm, which runs as `jointfm-cpu` or `jointfm-gpu` depending on that service's device. `CUDA_VISIBLE_DEVICES` in `.env` picks the GPU. To compare whole rebalancing decisions on both devices, use `experiments:devices`; to compare JointFM's scenario scores on both devices, run a config once per service, switching the selector in `.env` in between; the second run adds the other device's arm to the same results file. A selector switched while a session runs stops it.
+For a generator defined in a notebook or script, `scenario_generators.register("my_model", generate)` does the same for the running process.
 
 ### Streamlit GTC Demo
 

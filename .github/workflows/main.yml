@@ -35,8 +35,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        # The suite also tests experiments/, which needs the experiments extra.
-        run: uv sync --group dev --extra experiments
+        run: uv sync --group dev
 
       - name: Run tests
         # This runner has no GPU; the gpu-marked tests run in run-notebooks below.
