@@ -1214,7 +1214,7 @@ wheels = [
 
 [[package]]
 name = "jointfm-client"
-version = "0.14.0"
+version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
@@ -1225,9 +1225,9 @@ dependencies = [
     { name = "requests" },
     { name = "tenacity" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6a/04/085cc89f161dfaa14a02eab80ec2dc076b4554e322c8e5ea575c2f411189/jointfm_client-0.14.0.tar.gz", hash = "sha256:aa9c51c3419ccee3e4c7d86fbaa071aa44378459135d5530738190f4e4045ee1", size = 105236, upload-time = "2026-10-22T18:48:28.697Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6f/e0/d2418e8711df528c761bb07f53601d1a5f6d2d3d60ce1f019a372ca1ffd7/jointfm_client-0.16.0.tar.gz", hash = "sha256:0e8a4b9eb22d7152e363907628373fdd1fd63347b6755ec3ac1639d71ababa19", size = 105782, upload-time = "2026-11-09T18:04:02.239Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e6/ea/edf90712890f749fafb6fed53d77bf66361b1a871e7b44a4c9c114ccd999/jointfm_client-0.14.0-py3-none-any.whl", hash = "sha256:465efc5f3ad56a412f959a2ba27fe82db3321030664644ad9b53c4e78afc81ee", size = 94738, upload-time = "2026-10-22T18:48:27.082Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/7c/bf9f2dc3de2442a890ce83a7c58eaf246ada06ee58d7d925297d81a35366/jointfm_client-0.16.0-py3-none-any.whl", hash = "sha256:094e845a8c82ba474b8189eaa0d63bef010a25c50653a5be6922a8b7a4554069", size = 95184, upload-time = "2026-11-09T18:04:00.8Z" },
 ]
 
 [[package]]
@@ -2561,7 +2561,7 @@ requires-dist = [
     { name = "cuopt-cu13", marker = "extra == 'cuda13-socp'", specifier = "==26.6.*", index = "https://pypi.nvidia.com/" },
     { name = "cupy-cuda13x", marker = "extra == 'cuda13'", specifier = ">=14.2" },
     { name = "cvxpy", specifier = ">=1.9.2" },
-    { name = "jointfm-client", marker = "extra == 'jointfm'", specifier = "==0.14.*" },
+    { name = "jointfm-client", marker = "extra == 'jointfm'", specifier = "==0.16.*" },
     { name = "matplotlib", specifier = ">=3.8" },
     { name = "numpy", specifier = ">=2.0.0" },
     { name = "pandas", specifier = ">=2.0" },
